@@ -1,0 +1,45 @@
+- generic [ref=f15e46]:
+  - link "Skip to content" [ref=f15e47] [cursor=pointer]:
+    - /url: "#main-content"
+  - navigation "Sections" [ref=f15e48]:
+    - generic [ref=f15e53]:
+      - generic [ref=f15e54]: Proxy Crack
+      - generic [ref=f15e55]: Operations
+    - generic [ref=f15e56]:
+      - generic [ref=f15e57]:
+        - generic [ref=f15e58]: Overview
+        - link "Dashboard" [ref=f15e59] [cursor=pointer]:
+          - /url: /
+      - generic [ref=f15e66]:
+        - generic [ref=f15e67]: Accounts
+        - link "Users" [ref=f15e68] [cursor=pointer]:
+          - /url: /users
+        - link "Plans" [ref=f15e75] [cursor=pointer]:
+          - /url: /plans
+        - link "Subscriptions" [ref=f15e81] [cursor=pointer]:
+          - /url: /subscriptions
+      - generic [ref=f15e86]:
+        - generic [ref=f15e87]: Network
+        - link "Proxies" [ref=f15e88] [cursor=pointer]:
+          - /url: /proxies
+        - link "CSV import" [ref=f15e95] [cursor=pointer]:
+          - /url: /upload
+        - link "Upload batches" [ref=f15e100] [cursor=pointer]:
+          - /url: /upload-batches
+      - generic [ref=f15e104]:
+        - generic [ref=f15e105]: Insight
+        - link "Usage logs" [ref=f15e106] [cursor=pointer]:
+          - /url: /usage-logs
+        - link "User chains" [ref=f15e110] [cursor=pointer]:
+          - /url: /chains
+        - link "Content" [ref=f15e119] [cursor=pointer]:
+          - /url: /content
+    - generic "Serving data from the in-memory contract mock" [ref=f15e125]: Mock API
+  - generic [ref=f15e129]:
+    - banner [ref=f15e130]:
+      - heading "Dashboard" [level=1] [ref=f15e131]
+      - button "Ops Admin" [ref=f15e133] [cursor=pointer]:
+        - generic [aria-hidden] [ref=f15e134]: OA
+    - main [ref=f15e136]:
+      - status [ref=f15e137]:
+        - paragraph [ref=f15e139]: Loading dashboard…

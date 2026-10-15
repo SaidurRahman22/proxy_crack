@@ -1,0 +1,228 @@
+- generic [ref=f22e35]:
+  - link "Skip to content" [ref=f22e36] [cursor=pointer]:
+    - /url: "#main-content"
+  - navigation "Sections" [ref=f22e37]:
+    - generic [ref=f22e42]:
+      - generic [ref=f22e43]: Proxy Crack
+      - generic [ref=f22e44]: Operations
+    - generic [ref=f22e45]:
+      - generic [ref=f22e46]:
+        - generic [ref=f22e47]: Overview
+        - link "Dashboard" [ref=f22e48] [cursor=pointer]:
+          - /url: /
+      - generic [ref=f22e55]:
+        - generic [ref=f22e56]: Accounts
+        - link "Users" [ref=f22e57] [cursor=pointer]:
+          - /url: /users
+        - link "Plans" [ref=f22e64] [cursor=pointer]:
+          - /url: /plans
+        - link "Subscriptions" [ref=f22e70] [cursor=pointer]:
+          - /url: /subscriptions
+      - generic [ref=f22e75]:
+        - generic [ref=f22e76]: Network
+        - link "Proxies" [ref=f22e77] [cursor=pointer]:
+          - /url: /proxies
+        - link "CSV import" [ref=f22e84] [cursor=pointer]:
+          - /url: /upload
+        - link "Upload batches" [ref=f22e89] [cursor=pointer]:
+          - /url: /upload-batches
+      - generic [ref=f22e93]:
+        - generic [ref=f22e94]: Insight
+        - link "Usage logs" [ref=f22e95] [cursor=pointer]:
+          - /url: /usage-logs
+        - link "User chains" [ref=f22e99] [cursor=pointer]:
+          - /url: /chains
+        - link "Content" [ref=f22e108] [cursor=pointer]:
+          - /url: /content
+  - generic [ref=f22e113]:
+    - banner [ref=f22e114]:
+      - heading "Proxies" [level=1] [ref=f22e115]
+      - button "admin@proxycrack.local" [ref=f22e117] [cursor=pointer]:
+        - generic [aria-hidden] [ref=f22e118]: A
+    - main [ref=f22e120]:
+      - generic [ref=f22e121]:
+        - generic [ref=f22e122]:
+          - heading "Proxies" [level=2] [ref=f22e123]
+          - paragraph [ref=f22e124]: The pool handed to clients. Credentials are decrypted on the detail panel only, one deliberate request at a time.
+        - generic [ref=f22e125]:
+          - link "Import CSV" [ref=f22e126] [cursor=pointer]:
+            - /url: /upload
+          - button "New proxy" [ref=f22e130] [cursor=pointer]
+      - generic [ref=f22e132]:
+        - generic [ref=f22e133]:
+          - searchbox "Search host, country or city" [ref=f22e135]
+          - generic [ref=f22e136]:
+            - generic [ref=f22e137]: Filter by protocol
+            - combobox "Filter by protocol" [ref=f22e138]:
+              - option "Any protocol" [selected]
+              - option "ss"
+              - option "socks5"
+              - option "http"
+            - generic [ref=f22e139]: Filter by tier
+            - combobox "Filter by tier" [ref=f22e140]:
+              - option "Any tier" [selected]
+              - option "Free"
+              - option "Premium"
+            - generic [ref=f22e141]: Filter by country code
+            - combobox "Filter by country code" [ref=f22e142]
+            - generic [ref=f22e143]: Filter by health
+            - combobox "Filter by health" [ref=f22e144]:
+              - option "Any health" [selected]
+              - option "Alive"
+              - option "Dead"
+            - generic [ref=f22e145]: Filter by availability
+            - combobox "Filter by availability" [ref=f22e146]:
+              - option "Any availability" [selected]
+              - option "Enabled"
+              - option "Disabled"
+        - table [ref=f22e148]:
+          - caption [ref=f22e149]: Proxy pool
+          - rowgroup [ref=f22e150]:
+            - row [ref=f22e151]:
+              - columnheader "Select all rows on this page" [ref=f22e152]:
+                - generic [ref=f22e153] [cursor=pointer]:
+                  - checkbox "Select all rows on this page" [ref=f22e154]
+                  - generic [ref=f22e155]: Select all rows on this page
+              - columnheader [ref=f22e156]:
+                - button "Host sorted ascending" [ref=f22e157] [cursor=pointer]:
+                  - text: Host
+                  - generic [ref=f22e160]: sorted ascending
+              - columnheader "Protocol" [ref=f22e161]
+              - columnheader "Location" [ref=f22e162]
+              - columnheader "Tier" [ref=f22e163]
+              - columnheader "Health" [ref=f22e164]
+              - columnheader "Availability" [ref=f22e165]
+              - columnheader [ref=f22e166]:
+                - button "Latency not sorted" [ref=f22e167] [cursor=pointer]:
+                  - text: Latency
+                  - generic [ref=f22e171]: not sorted
+              - columnheader [ref=f22e172]:
+                - button "Checked not sorted" [ref=f22e173] [cursor=pointer]:
+                  - text: Checked
+                  - generic [ref=f22e177]: not sorted
+              - columnheader "Auth" [ref=f22e178]
+              - columnheader "Batch" [ref=f22e179]
+              - columnheader "Row actions" [ref=f22e180]
+          - rowgroup [ref=f22e182]:
+            - row [ref=f22e183]:
+              - cell "Select row 1" [ref=f22e184]:
+                - generic [ref=f22e185] [cursor=pointer]:
+                  - checkbox "Select row 1" [ref=f22e186]
+                  - generic [ref=f22e187]: Select row 1
+              - cell [ref=f22e188]:
+                - button "198.51.100.10:1080" [ref=f22e189] [cursor=pointer]:
+                  - text: 198.51.100.10
+                  - generic [ref=f22e190]: :1080
+              - cell "socks5" [ref=f22e191]
+              - cell "NL Amsterdam" [ref=f22e193]:
+                - generic [ref=f22e194]:
+                  - generic [ref=f22e195]: NL
+                  - generic [ref=f22e196]: Amsterdam
+              - cell "premium" [ref=f22e197]
+              - cell "Alive" [ref=f22e199]
+              - cell "Enabled" [ref=f22e204]
+              - cell "—" [ref=f22e208]
+              - cell "—" [ref=f22e209]
+              - cell "Required" [ref=f22e210]
+              - cell [ref=f22e215]:
+                - link "#1" [ref=f22e216] [cursor=pointer]:
+                  - /url: /upload-batches?search=1
+              - cell [ref=f22e217]:
+                - generic [ref=f22e218]:
+                  - button "Edit 198.51.100.10" [ref=f22e219] [cursor=pointer]
+                  - button "Delete 198.51.100.10" [ref=f22e224] [cursor=pointer]
+            - row [ref=f22e229]:
+              - cell "Select row 3" [ref=f22e230]:
+                - generic [ref=f22e231] [cursor=pointer]:
+                  - checkbox "Select row 3" [ref=f22e232]
+                  - generic [ref=f22e233]: Select row 3
+              - cell [ref=f22e234]:
+                - button "198.51.100.22:8388" [ref=f22e235] [cursor=pointer]:
+                  - text: 198.51.100.22
+                  - generic [ref=f22e236]: :8388
+              - cell "ss" [ref=f22e237]
+              - cell "SG Singapore" [ref=f22e239]:
+                - generic [ref=f22e240]:
+                  - generic [ref=f22e241]: SG
+                  - generic [ref=f22e242]: Singapore
+              - cell "premium" [ref=f22e243]
+              - cell "Alive" [ref=f22e245]
+              - cell "Enabled" [ref=f22e250]
+              - cell "—" [ref=f22e254]
+              - cell "—" [ref=f22e255]
+              - cell "Required" [ref=f22e256]
+              - cell [ref=f22e261]:
+                - link "#1" [ref=f22e262] [cursor=pointer]:
+                  - /url: /upload-batches?search=1
+              - cell [ref=f22e263]:
+                - generic [ref=f22e264]:
+                  - button "Edit 198.51.100.22" [ref=f22e265] [cursor=pointer]
+                  - button "Delete 198.51.100.22" [ref=f22e270] [cursor=pointer]
+            - row [ref=f22e275]:
+              - cell "Select row 2" [ref=f22e276]:
+                - generic [ref=f22e277] [cursor=pointer]:
+                  - checkbox "Select row 2" [ref=f22e278]
+                  - generic [ref=f22e279]: Select row 2
+              - cell [ref=f22e280]:
+                - button "203.0.113.7:8080" [ref=f22e281] [cursor=pointer]:
+                  - text: 203.0.113.7
+                  - generic [ref=f22e282]: :8080
+              - cell "http" [ref=f22e283]
+              - cell "DE Frankfurt" [ref=f22e285]:
+                - generic [ref=f22e286]:
+                  - generic [ref=f22e287]: DE
+                  - generic [ref=f22e288]: Frankfurt
+              - cell "free" [ref=f22e289]
+              - cell "Alive" [ref=f22e291]
+              - cell "Enabled" [ref=f22e296]
+              - cell "—" [ref=f22e300]
+              - cell "—" [ref=f22e301]
+              - cell "None" [ref=f22e302]
+              - cell [ref=f22e303]:
+                - link "#1" [ref=f22e304] [cursor=pointer]:
+                  - /url: /upload-batches?search=1
+              - cell [ref=f22e305]:
+                - generic [ref=f22e306]:
+                  - button "Edit 203.0.113.7" [ref=f22e307] [cursor=pointer]
+                  - button "Delete 203.0.113.7" [ref=f22e312] [cursor=pointer]
+            - row [ref=f22e317]:
+              - cell "Select row 4" [ref=f22e318]:
+                - generic [ref=f22e319] [cursor=pointer]:
+                  - checkbox "Select row 4" [ref=f22e320]
+                  - generic [ref=f22e321]: Select row 4
+              - cell [ref=f22e322]:
+                - button "203.0.113.9:1080" [ref=f22e323] [cursor=pointer]:
+                  - text: 203.0.113.9
+                  - generic [ref=f22e324]: :1080
+              - cell "socks5" [ref=f22e325]
+              - cell "US Dallas" [ref=f22e327]:
+                - generic [ref=f22e328]:
+                  - generic [ref=f22e329]: US
+                  - generic [ref=f22e330]: Dallas
+              - cell "free" [ref=f22e331]
+              - cell "Alive" [ref=f22e333]
+              - cell "Enabled" [ref=f22e338]
+              - cell "—" [ref=f22e342]
+              - cell "—" [ref=f22e343]
+              - cell "Required" [ref=f22e344]
+              - cell [ref=f22e349]:
+                - link "#1" [ref=f22e350] [cursor=pointer]:
+                  - /url: /upload-batches?search=1
+              - cell [ref=f22e351]:
+                - generic [ref=f22e352]:
+                  - button "Edit 203.0.113.9" [ref=f22e353] [cursor=pointer]
+                  - button "Delete 203.0.113.9" [ref=f22e358] [cursor=pointer]
+        - generic [ref=f22e363]:
+          - generic [ref=f22e364]:
+            - generic [ref=f22e365]: 1–4
+            - text: of 4 proxies
+          - generic [ref=f22e366]:
+            - generic [ref=f22e367]: Rows per page
+            - combobox "Rows per page" [ref=f22e368]:
+              - option "25 / page"
+              - option "50 / page" [selected]
+              - option "100 / page"
+              - option "200 / page"
+            - button "Previous page" [disabled] [ref=f22e369]
+            - generic [ref=f22e373]: 1 / 1
+            - button "Next page" [disabled] [ref=f22e374]

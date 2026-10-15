@@ -1,0 +1,146 @@
+/*
+ * Proxy Crack — admin design tokens.
+ *
+ * Source of truth: design-system/proxy-crack/MASTER.md, mirrored from the
+ * Flutter app's app_colors.dart so the two products share one visual language.
+ *
+ * Every pairing in here is verified by `npm run check:contrast`
+ * (scripts/contrast-check.mjs). Contrast ratios in the comments are measured,
+ * not estimated. Alpha colours are composited over their real backdrop before
+ * being measured.
+ *
+ * The app is dark-only by design — it is an operations console, and the
+ * palette above is a dark palette. There is no light theme to fall back to,
+ * so `color-scheme: dark` is declared rather than media-queried.
+ */
+:root {
+  color-scheme: dark;
+
+  /* ---- Surfaces ------------------------------------------------------- */
+  --bg: #0f172a;              /* --color-background */
+  --muted: #10192e;           /* --color-muted — recessed (table headers)   */
+  --card: #192134;            /* --color-card — raised                      */
+  --raised: #1e283c;          /* popovers, modals, drawers — above card     */
+  --overlay: rgba(6, 11, 22, 0.72);
+
+  /* ---- Brand ---------------------------------------------------------- */
+  --primary: #1e3a5f;         /* --color-primary — fill only                */
+  --on-primary: #ffffff;      /* 11.52:1 on --primary                       */
+  --secondary: #334155;       /* --color-secondary — fill only              */
+  --on-secondary: #ffffff;    /* 10.41:1 on --secondary                     */
+  --accent: #22c55e;          /* --color-accent — also the "alive" signal   */
+  --on-accent: #0f172a;       /* 7.77:1 on --accent                         */
+
+  /* ---- Foreground ------------------------------------------------------ */
+  --fg: #ffffff;              /* 17.85:1 on --bg, 15.79:1 on --card         */
+  --subtle-fg: #cbd5e1;       /* 11.12:1 on --bg — body text, 7.0:1 on fill */
+  --muted-fg: #94a3b8;        /* 7.00:1 on --bg, 6.19:1 on --card           */
+
+  /* ---- Status ---------------------------------------------------------
+   * --destructive is FILL ONLY. It measures 3.70:1 as text on --bg and
+   * fails WCAG AA. Never set `color: var(--destructive)`; use
+   * --destructive-text (6.45:1) for red glyphs and red copy.
+   * ------------------------------------------------------------------- */
+  --destructive: #dc2626;
+  --on-destructive: #ffffff;  /* 4.83:1 on --destructive                    */
+  --destructive-text: #f87171;/* 6.45:1 on --bg, 5.71:1 on --card           */
+  --warning: #fbbf24;         /* 10.73:1 on --bg, 9.49:1 on --card          */
+  --info: #7dd3fc;            /* 10.52:1 on --bg                            */
+
+  /* ---- Status tints (fills behind status text) ------------------------ */
+  --accent-tint: rgba(34, 197, 94, 0.13);
+  --warning-tint: rgba(251, 191, 36, 0.13);
+  --danger-tint: rgba(248, 113, 113, 0.13);
+  --info-tint: rgba(125, 211, 252, 0.12);
+  --neutral-tint: rgba(148, 163, 184, 0.12);
+
+  /* ---- Categorical data palette ---------------------------------------
+   * Protocol series only (ss / socks5 / http). Assigned in fixed order and
+   * never cycled, so a protocol keeps its colour across every chart.
+   * Validated on --card: lightness band, chroma floor, CVD separation
+   * (worst adjacent dE 26.0 deutan) and >=3:1 contrast all pass.
+   * Green is deliberately absent — #22C55E is reserved for connected/alive
+   * status and must not also mean "a protocol".
+   * ------------------------------------------------------------------- */
+  --series-ss: #3987e5;
+  --series-socks5: #d95926;
+  --series-http: #9085e9;
+
+  /* Bandwidth series — up/down share one scale, so one chart, two series. */
+  --series-up: #3987e5;
+  --series-down: #9085e9;
+
+  /* ---- Lines ----------------------------------------------------------- */
+  --border: rgba(255, 255, 255, 0.08);        /* --color-border — card edges */
+  --border-strong: rgba(255, 255, 255, 0.16);
+  /* Dense tables need more structure than a card edge does. Decorative
+   * gridline only: it never carries or delimits meaning on its own. */
+  --grid-line: #475569;
+  --ring: #22c55e;                            /* focus ring, 7.77:1 on --bg */
+
+  /* ---- Interaction ----------------------------------------------------- */
+  --hover: rgba(255, 255, 255, 0.04);
+  --active: rgba(255, 255, 255, 0.07);
+  --selected: rgba(34, 197, 94, 0.09);
+
+  /* ---- Type ------------------------------------------------------------ */
+  --font: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', monospace;
+
+  --text-2xs: 0.6875rem;  /* 11px — eyebrow labels, uppercase              */
+  --text-xs: 0.75rem;     /* 12px — table meta, badges                     */
+  --text-sm: 0.8125rem;   /* 13px — table cells                            */
+  --text-base: 0.875rem;  /* 14px — controls, body                         */
+  --text-md: 1rem;        /* 16px — card titles                            */
+  --text-lg: 1.1875rem;   /* 19px — page titles                            */
+  --text-xl: 1.5rem;      /* 24px                                          */
+  --text-2xl: 1.875rem;   /* 30px — stat figures                           */
+  --text-3xl: 2.375rem;   /* 38px — hero figure                            */
+
+  --tracking-label: 0.08em;
+  --tracking-tight: -0.011em;
+
+  /* ---- Space (MASTER.md density 7/10, plus 12/20 for table rhythm) ----- */
+  --space-2xs: 0.25rem;   /* 4  */
+  --space-xs: 0.5rem;     /* 8  */
+  --space-sm: 0.75rem;    /* 12 */
+  --space-md: 1rem;       /* 16 */
+  --space-lg: 1.25rem;    /* 20 */
+  --space-xl: 1.5rem;     /* 24 */
+  --space-2xl: 2rem;      /* 32 */
+  --space-3xl: 3rem;      /* 48 */
+
+  /* ---- Radius (MASTER.md: control 8, card 12, modal 16) ---------------- */
+  --radius-xs: 0.25rem;
+  --radius-sm: 0.375rem;
+  --radius: 0.5rem;
+  --radius-card: 0.75rem;
+  --radius-modal: 1rem;
+  --radius-pill: 999px;
+
+  /* ---- Elevation ------------------------------------------------------- */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.28);
+  --shadow-md: 0 4px 10px rgba(0, 0, 0, 0.32);
+  --shadow-lg: 0 12px 28px rgba(0, 0, 0, 0.42);
+  --shadow-xl: 0 24px 56px rgba(0, 0, 0, 0.55);
+
+  /* ---- Motion (MASTER.md: subtle hover 200-250ms) ---------------------- */
+  --dur-fast: 120ms;
+  --dur: 200ms;
+  --dur-slow: 250ms;
+  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+
+  /* ---- Layout ---------------------------------------------------------- */
+  --sidebar-w: 15rem;        /* 240px */
+  --sidebar-rail-w: 4rem;    /* 64px  */
+  --header-h: 3.5rem;        /* 56px  */
+  --row-h: 2.75rem;          /* 44px — dense table row, still a touch target */
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 1ms;
+    --dur: 1ms;
+    --dur-slow: 1ms;
+  }
+}

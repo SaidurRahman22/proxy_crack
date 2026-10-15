@@ -1,0 +1,33 @@
+- main [ref=f15e3]:
+  - generic [ref=f15e4]:
+    - generic [ref=f15e5]:
+      - generic [ref=f15e6]: Proxy Crack
+      - heading "Operations console" [level=1] [ref=f15e11]
+      - paragraph [ref=f15e12]: Staff accounts only.
+    - generic [ref=f15e13]:
+      - alert [ref=f15e39]:
+        - generic [ref=f15e42]: Email or password is incorrect, or the account is not permitted to sign in here.
+      - generic [ref=f15e14]:
+        - generic [ref=f15e15]:
+          - text: Email
+          - generic [aria-hidden] [ref=f15e16]: "*"
+          - generic [ref=f15e17]: (required)
+        - textbox "Email (required)" [ref=f15e18]: admin@proxycrack.io
+      - generic [ref=f15e19]:
+        - generic [ref=f15e20]:
+          - text: Password
+          - generic [aria-hidden] [ref=f15e21]: "*"
+          - generic [ref=f15e22]: (required)
+        - generic [ref=f15e23]:
+          - textbox "Password (required)" [ref=f15e24]
+          - button "Show password" [ref=f15e25] [cursor=pointer]
+      - button "Sign in" [ref=f15e30] [cursor=pointer]
+      - paragraph [ref=f15e34]:
+        - text: Mock API is enabled. Sign in with
+        - code [ref=f15e35]: admin@proxycrack.io
+        - text: /
+        - code [ref=f15e36]: proxycrack
+        - text: . Set
+        - code [ref=f15e37]: VITE_USE_MOCK_API=false
+        - text: to use the Django backend.
+    - paragraph [ref=f15e38]: "API: in-memory mock"

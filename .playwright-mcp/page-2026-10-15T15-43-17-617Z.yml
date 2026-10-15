@@ -1,0 +1,23 @@
+- main [ref=f22e3]:
+  - generic [ref=f22e4]:
+    - generic [ref=f22e5]:
+      - generic [ref=f22e6]: Proxy Crack
+      - heading "Operations console" [level=1] [ref=f22e11]
+      - paragraph [ref=f22e12]: Staff accounts only.
+    - generic [ref=f22e13]:
+      - generic [ref=f22e14]:
+        - generic [ref=f22e15]:
+          - text: Email
+          - generic [aria-hidden] [ref=f22e16]: "*"
+          - generic [ref=f22e17]: (required)
+        - textbox "Email (required)" [active] [ref=f22e18]
+      - generic [ref=f22e19]:
+        - generic [ref=f22e20]:
+          - text: Password
+          - generic [aria-hidden] [ref=f22e21]: "*"
+          - generic [ref=f22e22]: (required)
+        - generic [ref=f22e23]:
+          - textbox "Password (required)" [ref=f22e24]
+          - button "Show password" [ref=f22e25] [cursor=pointer]
+      - button "Sign in" [ref=f22e30] [cursor=pointer]
+    - paragraph [ref=f22e34]: "API: http://127.0.0.1:8000"

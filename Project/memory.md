@@ -41,7 +41,61 @@ content, and bulk proxy-list upload.
 | D4 | 2026-10-15 | **SOCKS5 + HTTP + Shadowsocks** protocols | Covers commercial providers plus an encrypted first hop | yes |
 | D5 | 2026-10-15 | Toolchains live in `D:\dev\` | No spaces in path — avoids Gradle/CocoaPods failures | yes |
 | D6 | 2026-10-15 | Monorepo: `app/` `backend/` `Project/` `Pre-Flight/` | Three components, one history | yes |
-| D7 | 2026-10-15 | **Admin panel stays minimal — stock Django Admin only** | Operator will build a custom panel later. Do not invest in admin UX now; keep models clean and extensible so a custom panel can be layered on. | yes |
+| ~~D7~~ | 2026-10-15 | ~~Admin panel stays minimal — stock Django Admin only~~ | **SUPERSEDED by D12 the same day.** Operator saw the stock admin and rejected it on looks. | — |
+| D12 | 2026-10-15 | **Custom React SPA admin replaces Django Admin.** Vite + React + TypeScript in `admin/`, consuming a new staff-only API at `/api/admin/`. | Stock Django Admin looks dated and the operator wants the panel to match the product. Django Admin stays mounted at `/admin/` as a superuser fallback, not deleted. | moderate — ongoing maintenance cost |
+
+### D12 consequences
+
+| | |
+|---|---|
+| **The mobile API cannot serve the admin.** | `/api/` is entitlement-scoped by design — a free user sees a filtered subset. Admin needs the opposite: unscoped, staff-only. Hence a separate `/api/admin/` surface. |
+| **Security surface doubles.** | The admin API is unscoped, so a missing permission class leaks everything. Every endpoint requires `IsAuthenticated AND is_staff`; non-staff must get 403, not data. Tests parametrise over every endpoint to catch a missed one. |
+| **Contract-first.** | `Project/admin-api-contract.md` is the spec both halves are built against, so backend and SPA can be developed in parallel. |
+| **Credentials.** | Decrypted on the admin *detail* endpoint only, never in lists, never cached client-side, audit log still fires. |
+| **Cost.** | Re-implements auth, permissions, CRUD, forms, validation and CSV upload that Django Admin provided for free. Accepted deliberately for brand control. |
+| ⚠️ **AUDIT LOG REGRESSION** | Django Admin ships `django.contrib.admin.LogEntry`, which records every add/change/delete with actor, object and timestamp. **The SPA abandons it.** Nothing in the contract replaces it. An admin console holding the company's entire sellable asset would have *no* record of who changed what. A replacement audit log is required, not optional — and `Plan` entitlement changes are its single highest-value event (see P9). |
+
+### Confirmed defects found by the threat model — 2026-10-15
+
+| # | Severity | Finding | Status |
+|---|---|---|---|
+| **V1** | 🔴 **Data loss** | **CSV import silently blanks credentials.** `importers._clean_row` always writes `username`/`password`/`ss_method` into `defaults`, so a metadata-only re-upload wipes them via `update_or_create`. **Reproduced live:** `'live_user'/'live_pass'` → `''/''`. Encrypted at rest with no plaintext backup, so **irrecoverable**. | sent for fix |
+| **V2** | 🔴 Critical | **Every throttle is per-process.** `CACHES` is unset → `LocMemCache` → the 60/hour credential throttle is actually N×60/hour across N workers, unshared across hosts, and resets on deploy. Confirmed: no `CACHES` key in settings. | sent for fix |
+| **V3** | 🔴 Critical | **Staff self-escalation.** `is_staff`/`is_superuser` are writable CRUD fields. `PATCH {"is_superuser": true}` on self is live. Today `is_staff` ≡ `is_superuser`. | sent for fix |
+| **V4** | 🔴 Critical | **`set_password` has no privilege boundary** — any staff can reset the superuser's password and log in at `/admin/`. | sent for fix |
+| **V5** | 🟠 High | **Entitlement flip.** One `PATCH` to the free plan's `max_proxy_tier` re-entitles the whole free user base; credentials are then scraped via the *mobile* API with throwaway accounts. Touches no admin throttle, fires no admin audit line. Stealthier than direct exfiltration. | sent for fix |
+| **V6** | 🟠 High | No CSV size/row cap on the API path; no cap on bulk `ids[]` bodies; no admin-side credential throttle. | sent for fix |
+| **V7** | 🟡 Medium | `bulk_delete` cannot express partial failure; `ChainHop.proxy` is `PROTECT`, so one referenced id 500s the batch. | ✅ **FIXED** |
+
+**All V1–V7 fixed and independently verified. 244 tests pass.** V1 verified in both
+directions — a metadata-only CSV preserves credentials, *and* an explicit empty-column clear
+still works (the naive fix breaks the second).
+
+### Hardening added beyond the findings
+
+| | |
+|---|---|
+| **Token separation** | Admin tokens carry a `scope: "admin"` claim checked at the *authentication* layer, before any permission class. A mobile token gets 403 `admin_scope_required`. Turns "one missing permission class = total compromise" into two independent failures. |
+| **Boot refusal** | `adminapi.E001` walks the resolved URLconf including `@action` routes and **refuses to start** if any `/api/admin/` route lacks `IsStaffUser`. Structural answer to Ground Rule 2. |
+| **Graded throttles** | credential reveal 120/h **and 400/day** (an hourly cap alone is defeated by patience); bulk 20/h; CSV 10/h; login per-IP 10/min + per-email 20/h on *failures only*, so an operator cannot lock themselves out. |
+| **Deploy checks** | `core.E002` LocMem+throttling · `E003` placeholder SECRET_KEY · `E005` `ALLOWED_HOSTS=*` · `W001` JWT key == SECRET_KEY |
+| **Last-free-plan guard** | Deactivating the last active free plan is refused (409) — otherwise every free user silently drops to `ENTITLEMENT_FALLBACK`. |
+
+### Still open
+
+| # | Gap |
+|---|---|
+| **P9** | **Durable `AdminAuditLog` table.** Audit events are structured log records only — readable by staff, deletable by a superuser. Biggest remaining gap. |
+| **P10** | No MFA; 30-day refresh token in `localStorage`. |
+| **P11** | CSV import is synchronous in a request worker; no out-of-band processing. |
+| **P12** | CSV *export* sanitisation (formula injection) — no export endpoint exists yet; the rule belongs in the contract **before** someone adds the button. |
+| ~~P13~~ | **RESOLVED 2026-10-15.** Credential disclosure moved to `POST /api/admin/proxies/{id}/reveal/`. The detail `GET` now returns the credential-free list serializer, so opening a drawer is no longer a disclosure — the audit log records disclosures rather than page views, and the 120/h + 400/day budget applies only to deliberate reveals. The SPA had independently built against `/reveal/` with a fallback, and deliberately avoided `useQuery` so plaintext never enters the query cache. 245 tests pass. |
+
+### Contract drift — backend deviates from `admin-api-contract.md`
+
+1. **`/auth/refresh/` returns `{access, refresh}`, not `{access}`** — rotation + blacklist are on, so a client keeping the old refresh token is logged out at its next refresh. **Relayed to the SPA agent.**
+2. Login returns **403 for every failure** including wrong password, so the response cannot reveal whether an account exists.
+3. Generic admin throttle set to 1200/h rather than 600/h, since high-value endpoints now carry their own tighter scopes.
 | D8 | 2026-10-15 | **Android is the FOUNDATION, not the end state. Windows, Linux and macOS clients follow.** | The product is a cross-platform proxychains. Mobile ships first and proves the model; desktop is built from the same Flutter codebase and the same engine core. | ❌ shapes every layer |
 | D9 | 2026-10-15 | **Engine = Xray-core (MPL-2.0) via libXray (MIT). sing-box REJECTED.** | **Licence, not capability.** MPL §3.3 permits a proprietary "Larger Work" — Dart/Kotlin/Swift carry zero disclosure obligation. GPLv3 §5(c) would put the entire APK/installer under GPL across four products, and §10 would let any single subscriber legally strip the paywall and republish. D8 made this decisively worse: desktop ships outside an app store, so the contested part of the GPL/app-store argument falls away and §6 applies undiluted. Xray's `proxy/tun/` also removed sing-box's last technical edge. | ❌ hard to reverse after Phase 3 |
 | D10 | 2026-10-15 | **Platform order: Android → Linux → Windows → macOS** | Linux second, not Windows: cheapest way to prove the separate-process engine model with no driver, no signing cert, no AV politics, no new hardware. Relative cost Android 1x · Linux 1.5x · Windows 2x · macOS 4x. | yes |

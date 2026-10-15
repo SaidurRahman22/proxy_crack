@@ -9,7 +9,12 @@ admin.site.site_title = "Proxy Crack"
 admin.site.index_title = "Operations"
 
 urlpatterns = [
+    # Django Admin stays mounted as the superuser fallback (contract §4).
     path("admin/", admin.site.urls),
+    # Staff-only admin API. Listed before `api/` for readability only --
+    # Django matches `api/admin/` against this entry first either way,
+    # because `api.urls` has no `admin/` route to shadow it.
+    path("api/admin/", include("adminapi.urls")),
     path("api/", include("api.urls")),
 ]
 

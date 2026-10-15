@@ -1,7 +1,15 @@
+# Multi-process deployments also need a shared cache backend, or every DRF
+# throttle (including the credential-access limit) is per-worker. Set
+# CACHE_URL and install one of:
+#   redis>=5.0            for CACHE_URL=redis://...
+#   pymemcache>=4.0       for CACHE_URL=host:11211
+# Not pinned here because the dev server is single-process and uses LocMem.
+# `manage.py check --deploy` fails (core.E002) if this is skipped.
 asgiref==3.12.1
 cffi==2.1.1
 cryptography==50.0.2
 Django==5.2.18
+django-cors-headers==4.9.0
 django-filter==26.2
 djangorestframework==3.18.3
 djangorestframework_simplejwt==5.5.1

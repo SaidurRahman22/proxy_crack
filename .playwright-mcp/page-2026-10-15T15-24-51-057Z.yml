@@ -1,0 +1,178 @@
+- generic [ref=f18e3]:
+  - link "Skip to content" [ref=f18e4] [cursor=pointer]:
+    - /url: "#main-content"
+  - navigation "Sections" [ref=f18e5]:
+    - generic [ref=f18e10]:
+      - generic [ref=f18e11]: Proxy Crack
+      - generic [ref=f18e12]: Operations
+    - generic [ref=f18e13]:
+      - generic [ref=f18e14]:
+        - generic [ref=f18e15]: Overview
+        - link "Dashboard" [ref=f18e16] [cursor=pointer]:
+          - /url: /
+      - generic [ref=f18e23]:
+        - generic [ref=f18e24]: Accounts
+        - link "Users" [ref=f18e25] [cursor=pointer]:
+          - /url: /users
+        - link "Plans" [ref=f18e32] [cursor=pointer]:
+          - /url: /plans
+        - link "Subscriptions" [ref=f18e38] [cursor=pointer]:
+          - /url: /subscriptions
+      - generic [ref=f18e43]:
+        - generic [ref=f18e44]: Network
+        - link "Proxies" [ref=f18e45] [cursor=pointer]:
+          - /url: /proxies
+        - link "CSV import" [ref=f18e52] [cursor=pointer]:
+          - /url: /upload
+        - link "Upload batches" [ref=f18e57] [cursor=pointer]:
+          - /url: /upload-batches
+      - generic [ref=f18e61]:
+        - generic [ref=f18e62]: Insight
+        - link "Usage logs" [ref=f18e63] [cursor=pointer]:
+          - /url: /usage-logs
+        - link "User chains" [ref=f18e67] [cursor=pointer]:
+          - /url: /chains
+        - link "Content" [ref=f18e76] [cursor=pointer]:
+          - /url: /content
+    - generic "Serving data from the in-memory contract mock" [ref=f18e82]: Mock API
+  - generic [ref=f18e86]:
+    - banner [ref=f18e87]:
+      - heading "Dashboard" [level=1] [ref=f18e88]
+      - button "Ops Admin" [ref=f18e90] [cursor=pointer]:
+        - generic [aria-hidden] [ref=f18e91]: OA
+    - main [ref=f18e93]:
+      - generic [ref=f18e94]:
+        - generic [ref=f18e95]:
+          - heading "Operations overview" [level=2] [ref=f18e96]
+          - paragraph [ref=f18e97]: Fleet health, account movement and seven days of traffic.
+        - button "Refresh" [ref=f18e99] [cursor=pointer]
+      - generic [ref=f18e105]:
+        - generic [ref=f18e107]:
+          - generic [ref=f18e108]: Fleet 83.3% alive
+          - generic [ref=f18e112]: 640 proxies · 243 users · 153 active
+          - generic [ref=f18e113]:
+            - link "107 dead" [ref=f18e114] [cursor=pointer]:
+              - /url: /proxies?is_alive=false
+            - link "18 expired" [ref=f18e119] [cursor=pointer]:
+              - /url: /subscriptions?status=expired
+        - generic [ref=f18e125]:
+          - heading "Proxy fleet" [level=3] [ref=f18e126]
+          - generic [ref=f18e132]:
+            - generic [ref=f18e133]: 83.3%
+            - generic [ref=f18e134]: alive
+          - generic [ref=f18e135]:
+            - 'img "Alive: 533, Dead: 107" [ref=f18e137]'
+            - generic [ref=f18e140]:
+              - generic [ref=f18e141]:
+                - generic [ref=f18e142]: "533"
+                - generic [ref=f18e147]: Alive
+              - generic [ref=f18e148]:
+                - generic [ref=f18e149]: "107"
+                - generic [ref=f18e155]: Dead
+              - generic [ref=f18e156]:
+                - generic [ref=f18e157]: "640"
+                - generic [ref=f18e158]: Total
+        - generic [ref=f18e161]:
+          - heading "Users" [level=3] [ref=f18e162]
+          - generic [ref=f18e168]:
+            - generic [ref=f18e169]: "243"
+            - generic [ref=f18e170]: +18 7d
+          - generic [ref=f18e175]:
+            - generic [ref=f18e176]:
+              - generic [ref=f18e177]: "4"
+              - generic [ref=f18e178]: Staff
+            - generic [ref=f18e179]:
+              - generic [ref=f18e180]: "18"
+              - generic [ref=f18e181]: New this week
+        - generic [ref=f18e184]:
+          - heading "Subscriptions" [level=3] [ref=f18e185]
+          - generic [ref=f18e189]:
+            - generic [ref=f18e190]: "153"
+            - generic [ref=f18e191]: active
+          - generic [ref=f18e192]:
+            - 'img "Active: 153, Expired: 18" [ref=f18e194]'
+            - generic [ref=f18e197]:
+              - generic [ref=f18e198]:
+                - generic [ref=f18e199]: "104"
+                - generic [ref=f18e200]: Paid
+              - generic [ref=f18e201]:
+                - generic [ref=f18e202]: "80"
+                - generic [ref=f18e203]: Free tier
+              - generic [ref=f18e204]:
+                - generic [ref=f18e205]: "18"
+                - generic [ref=f18e206]: Expired
+        - generic [ref=f18e209]:
+          - heading "Traffic, last 7 days" [level=3] [ref=f18e210]
+          - generic [ref=f18e213]: 503 GiB
+          - generic [ref=f18e216]:
+            - generic [ref=f18e217]:
+              - generic [ref=f18e218]: 444 GiB
+              - generic [ref=f18e222]: Downstream
+            - generic [ref=f18e223]:
+              - generic [ref=f18e224]: 59 GiB
+              - generic [ref=f18e228]: Upstream
+            - generic [ref=f18e229]:
+              - generic [ref=f18e230]: "284"
+              - generic [ref=f18e231]: Sessions
+        - generic [ref=f18e232]:
+          - generic [ref=f18e233]:
+            - generic [ref=f18e234]:
+              - heading "Bandwidth, last 7 days" [level=3] [ref=f18e235]
+              - paragraph [ref=f18e236]: Bucketed by day from usage logs
+            - generic [ref=f18e237]:
+              - generic [ref=f18e238]: Down
+              - generic [ref=f18e240]: Up
+          - status [ref=f18e243]:
+            - paragraph [ref=f18e245]: Building the series…
+        - generic [ref=f18e246]:
+          - generic [ref=f18e247]:
+            - heading "Proxies by protocol" [level=3] [ref=f18e248]
+            - link "View all" [ref=f18e249] [cursor=pointer]:
+              - /url: /proxies
+          - generic [ref=f18e250]:
+            - generic [ref=f18e251]:
+              - link "socks5 32851%" [ref=f18e252] [cursor=pointer]:
+                - /url: /proxies?protocol=socks5
+                - generic [ref=f18e253]: socks5
+                - generic [ref=f18e256]: 32851%
+              - link "http 18629%" [ref=f18e257] [cursor=pointer]:
+                - /url: /proxies?protocol=http
+                - generic [ref=f18e258]: http
+                - generic [ref=f18e261]: 18629%
+              - link "ss 12620%" [ref=f18e262] [cursor=pointer]:
+                - /url: /proxies?protocol=ss
+                - generic [ref=f18e263]: ss
+                - generic [ref=f18e266]: 12620%
+            - separator [ref=f18e267]
+            - heading "By tier" [level=4] [ref=f18e268]
+            - generic [ref=f18e269]:
+              - 'img "Premium: 430, Free: 210" [ref=f18e270]'
+              - generic [ref=f18e273]:
+                - generic [ref=f18e274]:
+                  - text: Premium
+                  - generic [ref=f18e276]: "430"
+                - generic [ref=f18e277]:
+                  - text: Free
+                  - generic [ref=f18e279]: "210"
+        - generic [ref=f18e280]:
+          - generic [ref=f18e282]:
+            - heading "Signups, last 14 days" [level=3] [ref=f18e283]
+            - paragraph [ref=f18e284]: Bucketed by day from the user list
+          - status [ref=f18e286]:
+            - paragraph [ref=f18e288]: Building the series…
+        - generic [ref=f18e289]:
+          - generic [ref=f18e290]:
+            - heading "Last CSV import" [level=3] [ref=f18e291]
+            - link "All batches" [ref=f18e292] [cursor=pointer]:
+              - /url: /upload-batches
+          - generic [ref=f18e294]:
+            - generic [ref=f18e295]:
+              - generic [ref=f18e296]:
+                - generic [ref=f18e297]: 2 days ago
+                - generic [ref=f18e298]: Imported
+              - generic [ref=f18e299]:
+                - generic [ref=f18e300]: "176"
+                - generic [ref=f18e301]: rows
+            - paragraph [ref=f18e302]: Fleet health is measured by the checker, not by the import. 107 proxies failed their last check.
+            - link "Import another" [ref=f18e307] [cursor=pointer]:
+              - /url: /upload

@@ -1,0 +1,62 @@
+# ---- Flutter / Dart ----
+app/.dart_tool/
+app/.flutter-plugins
+app/.flutter-plugins-dependencies
+app/build/
+app/.pub-cache/
+app/.pub/
+**/doc/api/
+*.lock.bak
+
+# ---- Android ----
+app/android/.gradle/
+app/android/local.properties
+app/android/key.properties
+app/android/app/release/
+**/*.jks
+**/*.keystore
+**/google-services.json
+
+# ---- iOS (future) ----
+app/ios/Pods/
+app/ios/.symlinks/
+**/*.mobileprovision
+**/*.p12
+
+# ---- Backend / Admin ----
+node_modules/
+dist/
+.next/
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# ---- Django backend ----
+backend/db.sqlite3
+backend/*.sqlite3
+backend/staticfiles/
+backend/media/
+
+# ---- Secrets ----
+.env
+.env.*
+!.env.example
+*.pem
+secrets/
+
+# ---- Editors / OS ----
+.idea/
+*.iml
+.vscode/*
+!.vscode/launch.json
+!.vscode/settings.json
+.DS_Store
+Thumbs.db
+
+# ---- Logs ----
+*.log
+
+# Agent screenshots
+app/screen.png
+**/screen*.png

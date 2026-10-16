@@ -321,6 +321,22 @@ Purely additive; the Phase 1 log line is byte-for-byte unchanged.
 
 ## 7. Session log
 
+> **Current status lives in [STATUS.md](STATUS.md)** — read that first.
+
+### 2026-10-16
+- **R1 shipped** — health checking, quality scoring, positional failover (438 tests)
+- **P14 closed** — Shadowsocks AEAD prober. SS proxies are measured, not skipped.
+- **P15 closed** — unprobed vs measured exclusion distinguished; `allow_unprobed` opt-in
+- **P9 closed** — durable `AdminAuditLog`, append-only verified by attacking it (5 attacks
+  refused, including raw SQL). Closes the regression D12 introduced.
+- **D19** — mobile credential endpoint wired into the audit seam (that is where most paid
+  credentials actually leave the server, via D18's per-hop fetch)
+- Backend at **628 tests**, 38 migrations, 13 models across 4 apps
+- Operator committed twice (`8c68929` admin SPA, `17c728a` health + pruning). **3 commits total,
+  working tree clean, nothing pushed to GitHub yet.**
+- `STATUS.md` created; `graph.md` ER diagram updated with `ProxyProbe`, `AdminAuditLog` and the
+  constrained-hop columns; `roadmap.md` R1 marked shipped
+
 ### 2026-10-15
 - Built `Pre-Flight/` — 12-file setup checklist covering Flutter, Kotlin, Swift, RN, MAUI
 - Executed setup: JDK 17, Android SDK + NDK, Flutter 3.47.7, AVD, VS Code extensions

@@ -89,14 +89,20 @@ required, not optional.
 
 ## 3. Data model
 
+> **Built state as of 2026-10-16.** `PROXYPROBE` and `ADMINAUDITLOG` were added by roadmap R1
+> and P9; `CHAINHOP` gained constraint columns so a hop can be a *constraint* rather than a fixed
+> proxy. Health fields on `PROXY` are a **cache recomputed from `PROXYPROBE`**, never incremented.
+
 ```mermaid
 erDiagram
     USER ||--o| SUBSCRIPTION : has
     USER ||--o{ PROXYCHAIN : saves
     USER ||--o{ USAGELOG : generates
+    USER ||--o{ ADMINAUDITLOG : "acts (nullable, email denormalised)"
     PLAN ||--o{ SUBSCRIPTION : defines
     PROXYCHAIN }o--|| CHAINHOP : "ordered hops"
-    CHAINHOP }o--|| PROXY : references
+    CHAINHOP }o--o| PROXY : "fixed OR constrained"
+    PROXY ||--o{ PROXYPROBE : "health history"
     UPLOADBATCH ||--o{ PROXY : creates
     USER ||--o{ UPLOADBATCH : "admin uploads"
 
@@ -131,15 +137,43 @@ erDiagram
         string protocol "ss|socks5|http"
         string host
         int port
-        string username "encrypted"
-        string password "encrypted"
+        string username "ENCRYPTED (Fernet)"
+        string password "ENCRYPTED (Fernet)"
+        string ss_method "ENCRYPTED - cipher, required for ss"
         string country
         string city
         string tier "free|premium"
-        bool is_alive
-        int latency_ms
+        bool is_enabled "operator kill switch"
+        bool is_alive "derived: consecutive_failures >= 3"
+        float success_rate "rolling window"
+        int probe_count "window, not lifetime"
+        int consecutive_failures
+        int latency_p50_ms
+        int latency_p95_ms "p95 - tails matter"
+        float quality_score "unprobed = 50"
         datetime last_checked
         int upload_batch_id FK
+    }
+    PROXYPROBE {
+        int id PK
+        int proxy_id FK
+        datetime checked_at
+        bool succeeded
+        int latency_ms "null on failure"
+        string error_kind "timeout|refused|auth_failed|dns|tls|protocol|unverifiable|unknown"
+        string target "what we CONNECTed to"
+    }
+    ADMINAUDITLOG {
+        int id PK
+        int actor_id FK "nullable - survives user deletion"
+        string actor_email "denormalised, survives"
+        string action
+        string target_type
+        string target_id
+        json changes "before/after - never a secret"
+        string ip
+        string user_agent
+        datetime created_at "APPEND-ONLY, DB trigger enforced"
     }
     PROXYCHAIN {
         int id PK
@@ -150,8 +184,14 @@ erDiagram
     CHAINHOP {
         int id PK
         int chain_id FK
-        int proxy_id FK
+        int proxy_id FK "NULL when constrained"
         int position "0,1,2 - order matters"
+        string c_protocol "constraint"
+        string c_country "constraint"
+        string c_tier "constraint"
+        int c_max_latency_ms "constraint - excludes unprobed"
+        float c_min_success_rate "constraint - excludes unprobed"
+        bool allow_unprobed "opt-in for fresh inventory"
     }
     UPLOADBATCH {
         int id PK

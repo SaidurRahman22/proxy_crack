@@ -30,7 +30,23 @@ Where it is genuinely weak:
 
 ## The three that actually matter
 
-### 1. Per-hop health checking and automatic failover 🔴 highest leverage
+### 1. Per-hop health checking and automatic failover ✅ **BUILT 2026-10-16**
+
+Shipped. 628 tests. What exists now:
+- `ProxyProbe` table + a real prober (SOCKS5, HTTP CONNECT, **and Shadowsocks AEAD**)
+- Quality scoring where **reliability multiplies** and latency only scales within a 40% band,
+  so a proxy dropping a third of its connections cannot climb back by being fast
+- Wilson lower bound, so 1/1 does not outrank 198/200
+- Flapping suppression: 3 consecutive failures to die, 1 success to revive, score stays depressed
+- **Positional failover** — a hop can be a constraint (`"any premium SOCKS5 in NL, p95 < 200ms"`)
+  resolved at connect time, never reusing a proxy within one chain
+- `POST /api/chains/{id}/resolve/`, `probe_proxies`, `prune_probes`
+
+Remaining within this item: mid-session failover without tearing down the TUN — that half is
+engine-side (Phase 3), and the backend half (`/resolve/`) is done.
+
+<details>
+<summary>Original writeup</summary>
 
 The single biggest functional gap in proxychains. Your schema already has `is_alive`,
 `latency_ms`, `last_checked` — **nothing writes them** (noted as Phase 4).
@@ -46,6 +62,8 @@ Build:
 - **Mid-session failover** without tearing down the TUN.
 
 > proxychains cannot do any of this. This is the clearest "strictly better" feature you have.
+
+</details>
 
 ### 2. Chain quality scoring — ASN and jurisdiction diversity 🔴 nobody does this well
 

@@ -1,0 +1,128 @@
+# Proxy Crack — Current Status
+
+**Last updated:** 2026-10-16
+**Read this first.** Detail lives in [architecture.md](architecture.md),
+[memory.md](memory.md), [graph.md](graph.md), [roadmap.md](roadmap.md).
+
+---
+
+## At a glance
+
+| | |
+|---|---|
+| **What works today** | Backend API + admin console, both running and verified. Mobile app UI with a mock engine. |
+| **What does not exist yet** | **The VPN engine.** No traffic is routed anywhere. This is Phase 3 and it is the biggest remaining build. |
+| **Repo** | `D:\project\Proxy`, branch `main`, **3 commits**, working tree clean |
+| **Remote** | `git@github.com:SaidurRahman22/proxy_crack.git` — ⚠️ **not pushed yet** (SSH key not registered on GitHub) |
+| **Backend tests** | **628 passing** |
+
+---
+
+## Component status
+
+| Component | State | Detail |
+|---|---|---|
+| **Backend API** (`backend/`) | ✅ working | Django 5.2 + DRF, 13 models, 38 migrations, 628 tests |
+| **Admin console** (`admin/`) | ✅ working | React + TS + Vite, runs against mock *or* live API |
+| **Mobile app** (`app/`) | 🟡 UI only | Flutter 3.47, 4 screens, adaptive layouts, **mock engine** |
+| **VPN engine** | ❌ not started | Phase 3. Xray-core via libXray decided (D9), nothing built |
+| **Desktop clients** | ❌ not started | Windows / Linux / macOS planned (D8), Android first |
+| **iOS** | ❌ blocked | Needs a Mac. Not buildable on this machine |
+
+---
+
+## Run it right now
+
+```bash
+# Backend + admin console
+cd D:\project\Proxy\backend
+.\.venv\Scripts\python.exe manage.py runserver 8000
+#   Django admin (fallback):  http://127.0.0.1:8000/admin/
+#   admin@proxycrack.local / ProxyCrack!Dev2026   <-- dev only, change it
+
+# Admin SPA (mock data by default)
+cd D:\project\Proxy\admin
+npm run dev            # http://localhost:5173
+#   admin@proxycrack.io / proxycrack   (mock credentials, shown on the login screen)
+#   to point at live Django:  echo VITE_USE_MOCK_API=false > .env.development.local
+
+# Mobile app
+cd D:\project\Proxy\app
+flutter run            # needs the emulator: desktop shortcut "Android Emulator"
+```
+
+### Operational commands
+
+| Command | What it does |
+|---|---|
+| `probe_proxies` | Health-check proxies, write probe rows, rescore |
+| `prune_probes` | Trim probe history (30-day default) |
+| `prune_audit_log` | Trim audit history (365-day default, 90-day floor, dry-run by default) |
+| `rotate_proxy_credentials` | Re-encrypt credentials under a new key |
+| `seed_plans` | Create the free + pro plans |
+
+---
+
+## What has actually been verified (not assumed)
+
+| | Evidence |
+|---|---|
+| Backend | 628 tests pass; `check` clean; no migration drift |
+| Mobile build chain | Debug APK built, installed via adb, **rendered on emulator** |
+| Admin SPA | `tsc` clean, production build, **screenshotted running against live Django** |
+| Credentials encrypted at rest | Raw SQL shows Fernet tokens; no plaintext in the columns |
+| Audit log is append-only | **5 attacks refused**, including raw SQL `UPDATE`/`DELETE` |
+| Refresh-token rotation | Old token → 401 blacklisted; chain survives repeated rotation |
+| Entitlement enforced server-side | Free user sees 2 of 4 proxies; `?tier=premium` returns 0 |
+| Health scoring / flapping | 1 failure survives, 3 kill, 1 success revives — score stays depressed |
+
+---
+
+## Open items needing **your** decision
+
+| # | Item | Why it matters |
+|---|---|---|
+| **P2** | Play Store **display name** | "Proxy Crack" reads as piracy tooling and risks rejection. `applicationId` is permanent; the display name is not. |
+| **P4** | Which paid proxy provider, and their ToS | Many providers **forbid** redistribution via an app. This could reshape the product. |
+| **P5** | **Wintun redistribution consent** | Needed for Windows TUN. Requires a lawyer. **Long lead time — start early.** |
+| **P6** | Desktop payment rail | Play Billing is Android-only; one subscription must unlock four clients. |
+| **P7** | UDP strategy | An HTTP hop cannot carry UDP. Any chain with one is TCP-only — no QUIC, VoIP, games. |
+| **D18** | Credential round trips | `/resolve/` returns identities + a `credentials_url` per hop, so a 3-hop connect costs 3 extra calls. Collapsing it weakens the credential boundary. |
+
+---
+
+## Known gaps (tracked, not forgotten)
+
+| # | Gap |
+|---|---|
+| **P8** | Credential keys live in the process environment — move to KMS before production |
+| **P10** | No MFA on the admin console; 30-day refresh token in `localStorage` |
+| **P11** | CSV import runs synchronously in a request worker |
+| **P12** | No CSV export sanitisation rule yet (write it **before** someone adds the button) |
+| — | **PostgreSQL audit trigger reviewed but never executed** — dev is SQLite. Validate before the Postgres move. |
+| — | **No published test vector exists for the Shadowsocks composition.** Tested against a second implementation written from the same spec — weaker evidence than a published vector, and the test docstring says so. |
+| — | **SS2022 (`2022-blake3-*`) not supported** — reported as `unsupported_cipher`, never as a dead proxy |
+
+---
+
+## Next steps, in order
+
+1. **Push to GitHub** — add your SSH key, then `git push -u origin main`
+   ```
+   ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAHs6Vf6BIfdECYSsx0oFO7ij2ziuec8kZH2pz9O8Fcl VFI
+   ```
+2. **R2 — ASN / jurisdiction / operator diversity scoring.** Pure data work, no engine
+   changes, and the thing that makes a chain *meaningful* rather than merely long.
+3. **Phase 3 — the VPN engine.** The real risk. Everything before it is conventional work.
+   Resolve **P5 (Wintun)** in parallel since it has an external lead time.
+
+---
+
+## The one thing to keep in mind
+
+Everything built so far is the **supporting cast**: accounts, entitlement, proxy inventory,
+health, an admin console. All of it is necessary and none of it routes a single packet.
+
+The product is the engine, and the engine has not been started. The plan for it is in
+[engine-decision.md](engine-decision.md), the licence question is settled (Xray-core, MPL), and
+the hardest part — a userspace TCP/IP stack — is solved by not writing it ourselves.

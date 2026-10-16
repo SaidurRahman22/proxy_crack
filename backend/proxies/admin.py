@@ -12,7 +12,7 @@ from django.urls import path, reverse
 
 from proxies.forms import ProxyCSVUploadForm
 from proxies.importers import CSVImportError, import_proxies_from_csv
-from proxies.models import ChainHop, Proxy, ProxyChain, UploadBatch
+from proxies.models import ChainHop, Proxy, ProxyChain, ProxyProbe, UploadBatch
 
 
 @admin.register(Proxy)
@@ -26,13 +26,29 @@ class ProxyAdmin(admin.ModelAdmin):
         "city",
         "is_enabled",
         "is_alive",
-        "latency_ms",
+        "quality_score",
+        "success_rate",
+        "latency_p95_ms",
         "last_checked",
     )
     list_filter = ("protocol", "tier", "is_enabled", "is_alive", "country")
     search_fields = ("host", "country", "city")
     list_select_related = ("upload_batch",)
     change_list_template = "admin/proxies/proxy/change_list.html"
+    # Derived from ProxyProbe by proxies.health. Editable here would mean
+    # an operator's hand-typed success rate silently reverting at the next
+    # probe run, which reads as the admin losing writes.
+    readonly_fields = (
+        "success_rate",
+        "probe_count",
+        "consecutive_failures",
+        "latency_p50_ms",
+        "latency_p95_ms",
+        "quality_score",
+        "last_checked",
+        "latency_ms",
+        "is_alive",
+    )
 
     def get_urls(self):
         custom = [
@@ -114,10 +130,50 @@ class UploadBatchAdmin(admin.ModelAdmin):
         return False
 
 
+@admin.register(ProxyProbe)
+class ProxyProbeAdmin(admin.ModelAdmin):
+    """Read-only. Probe rows are observations, not records to edit.
+
+    No add permission and no editable fields: a probe row that someone
+    typed is not a measurement, and the health figures derived from this
+    table would then be derived partly from opinion.
+    """
+
+    list_display = ("proxy", "checked_at", "succeeded", "latency_ms", "error_kind")
+    list_filter = ("succeeded", "error_kind", "checked_at")
+    search_fields = ("proxy__host", "target")
+    list_select_related = ("proxy",)
+    date_hierarchy = "checked_at"
+    readonly_fields = (
+        "proxy",
+        "checked_at",
+        "succeeded",
+        "latency_ms",
+        "error_kind",
+        "target",
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
 class ChainHopInline(admin.TabularInline):
     model = ChainHop
     extra = 0
     autocomplete_fields = ("proxy",)
+    fields = (
+        "position",
+        "proxy",
+        "protocol",
+        "country",
+        "tier",
+        "max_latency_ms",
+        "min_success_rate",
+        "allow_unprobed",
+    )
 
 
 @admin.register(ProxyChain)

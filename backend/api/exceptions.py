@@ -6,7 +6,8 @@ Every error response has the same shape so the Flutter client can branch on
     {"error": {"code": "chain_length_exceeded", "status": 403, "detail": ...}}
 """
 
-from rest_framework.exceptions import PermissionDenied
+from rest_framework import status
+from rest_framework.exceptions import APIException, PermissionDenied
 from rest_framework.views import exception_handler as drf_exception_handler
 
 
@@ -32,6 +33,34 @@ class ChainLengthExceeded(EntitlementDenied):
 class ProxyNotEntitled(EntitlementDenied):
     default_detail = "Your plan does not include one or more of these proxies."
     default_code = "proxy_not_entitled"
+
+
+class ChainUnresolvable(APIException):
+    """A chain that cannot be turned into concrete proxies right now.
+
+    409 rather than 400: the request is well-formed and the chain is
+    valid; the *world* does not currently contain a proxy that satisfies
+    one of its slots. A 400 would tell the client to fix its request, and
+    there is nothing in the request to fix.
+
+    `error.code` is always `chain_unresolvable`; the specific reason --
+    `hop_unsatisfied`, `hop_proxy_dead`, `hop_proxy_disabled` -- is
+    `error.detail.code`, alongside the failing `position`. Two levels
+    because the client's first branch is "can I connect or not", and only
+    the screen that explains the failure needs the second.
+    """
+
+    status_code = status.HTTP_409_CONFLICT
+    default_detail = "This chain cannot be resolved right now."
+    default_code = "chain_unresolvable"
+
+    def __init__(self, detail=None, code=None):
+        super().__init__(detail=detail, code=code)
+        if isinstance(detail, dict):
+            # Same reason as EntitlementDenied: the positions and counts in
+            # here are numbers the client compares against, and DRF would
+            # otherwise stringify every leaf.
+            self.detail = detail
 
 
 def api_exception_handler(exc, context):

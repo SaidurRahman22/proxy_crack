@@ -184,6 +184,11 @@ REST_FRAMEWORK = {
         "proxy_list": env("THROTTLE_PROXY_LIST", "60/min"),
         "proxy_credentials": env("THROTTLE_PROXY_CREDENTIALS", "60/hour"),
         "chain_write": env("THROTTLE_CHAIN_WRITE", "60/hour"),
+        # Chain resolution. Looser than a write because a client resolves
+        # on every connect and on every failover, but still bounded: a
+        # constrained hop is a query against the inventory, and an
+        # unthrottled one is an oracle for enumerating it.
+        "chain_resolve": env("THROTTLE_CHAIN_RESOLVE", "120/hour"),
         "usage_report": env("THROTTLE_USAGE_REPORT", "120/hour"),
         "content": env("THROTTLE_CONTENT", "60/hour"),
         # --- Admin API ---------------------------------------------------
@@ -215,6 +220,11 @@ REST_FRAMEWORK = {
         "admin_bulk": env("THROTTLE_ADMIN_BULK", "20/hour"),
         # One call is minutes of synchronous worker time.
         "admin_csv_upload": env("THROTTLE_ADMIN_CSV_UPLOAD", "10/hour"),
+        # One call opens up to PROXY_PROBE_API_MAX_IDS outbound connections
+        # and holds a worker while they complete. Tight on purpose: the
+        # scheduled `probe_proxies` command is the normal path, and this
+        # endpoint is the "check these twelve right now" button beside it.
+        "admin_probe": env("THROTTLE_ADMIN_PROBE", "30/hour"),
     },
     "EXCEPTION_HANDLER": "api.exceptions.api_exception_handler",
 }
@@ -313,6 +323,114 @@ PROXY_CRED_KEYS = env_list("PROXY_CRED_KEY")
 
 
 # ---------------------------------------------------------------------------
+# Proxy health checking, scoring and failover.
+#
+# `is_alive` existed in Phase 1 and nothing wrote it. These settings are
+# what the prober, the scorer and the chain resolver read. Validated by
+# proxies/checks.py -- notably PROXY_PROBE_RETENTION_DAYS must be >=
+# PROXY_PROBE_WINDOW_DAYS, or pruning deletes the rows scoring depends on.
+# ---------------------------------------------------------------------------
+
+# --- What a probe does -----------------------------------------------------
+# The prober opens a real connection THROUGH the proxy to this target and
+# times the round trip. Not a TCP handshake against the proxy's own port: a
+# listening socket proves nothing about whether traffic still flows.
+# Port 443 because many proxies permit CONNECT only to 443, and a probe a
+# correctly-configured proxy refuses measures our configuration, not theirs.
+PROXY_PROBE_TARGET_HOST = env("PROXY_PROBE_TARGET_HOST", "www.google.com")
+PROXY_PROBE_TARGET_PORT = env_int("PROXY_PROBE_TARGET_PORT", 443)
+
+# Whole-handshake budget, not per socket operation.
+PROXY_PROBE_TIMEOUT_SECONDS = float(env("PROXY_PROBE_TIMEOUT_SECONDS", "10"))
+# Bounded: probing is IO-bound so threads are right, but one thread per row
+# exhausts file descriptors long before it exhausts the inventory.
+PROXY_PROBE_CONCURRENCY = env_int("PROXY_PROBE_CONCURRENCY", 8)
+
+# Swapped for proxies.probing.FakeProber in every test. Nothing in the test
+# suite may touch the network.
+PROXY_PROBER = env("PROXY_PROBER", "proxies.probing.SocketProber")
+
+# --- The rolling window ----------------------------------------------------
+# "The newest N probes, none older than D days." Bounded on both axes: a
+# count alone judges a rarely-probed proxy on last quarter's data, an age
+# alone lets one busy afternoon swamp the sample.
+PROXY_PROBE_WINDOW = env_int("PROXY_PROBE_WINDOW", 50)
+PROXY_PROBE_WINDOW_DAYS = env_int("PROXY_PROBE_WINDOW_DAYS", 7)
+
+# --- Retention -------------------------------------------------------------
+# ProxyProbe is the only table that grows without a user action. 10k proxies
+# at one probe per five minutes is ~2.9M rows a day. `prune_probes` enforces
+# this; see its docstring.
+PROXY_PROBE_RETENTION_DAYS = env_int("PROXY_PROBE_RETENTION_DAYS", 30)
+
+# --- Liveness --------------------------------------------------------------
+# Consecutive failures before a proxy is marked dead. One timeout is noise.
+# Note the asymmetry: N failures to die, a single success to revive. Failing
+# slow and recovering fast is deliberate -- a proxy that flaps is punished
+# by its success rate, which is a far better signal than a boolean.
+PROXY_DEAD_AFTER_FAILURES = env_int("PROXY_DEAD_AFTER_FAILURES", 3)
+
+# --- Scoring (see proxies/health.py for the model) -------------------------
+# Latency's maximum influence on the score, as a fraction. At 0.4 latency
+# can move a score within a 40% band; reliability multiplies the whole
+# thing. Above ~0.6 the model inverts and fast-but-lossy starts winning.
+PROXY_LATENCY_WEIGHT = float(env("PROXY_LATENCY_WEIGHT", "0.4"))
+# p95 at which the latency factor is exactly 0.5. A smooth curve, not a
+# cliff, so a proxy does not change rank for crossing a threshold by 1 ms.
+PROXY_LATENCY_HALF_MS = env_int("PROXY_LATENCY_HALF_MS", 400)
+# Wilson lower-bound confidence. 1.0, not the textbook 1.96: at 1.96 a
+# single successful probe scores 0.21 and would rank below a proxy nobody
+# has ever probed, which is perverse. At 1.0 it scores ~0.50 -- "one probe
+# is barely more than none", which is the truth.
+PROXY_SCORE_CONFIDENCE_Z = float(env("PROXY_SCORE_CONFIDENCE_Z", "1.0"))
+# The score for a proxy with no probes in the window. Mid-scale on purpose:
+# below anything proven good, above anything proven bad. Zero would make a
+# fresh CSV import unselectable. Mirrors proxies.models.UNPROBED_QUALITY_SCORE,
+# which is the model field default (a default has to be a literal).
+PROXY_UNPROBED_SCORE = float(env("PROXY_UNPROBED_SCORE", "50.0"))
+
+# --- Admin-triggered probe runs --------------------------------------------
+# The admin endpoint probes synchronously in the request worker, so the id
+# list is capped far below MAX_IDS. 50 proxies x a 10 s timeout is already
+# a worker held for most of a minute in the worst case.
+PROXY_PROBE_API_MAX_IDS = env_int("PROXY_PROBE_API_MAX_IDS", 50)
+
+
+# ---------------------------------------------------------------------------
+# Admin audit log (P9).
+#
+# D12 dropped `django.contrib.admin.LogEntry` along with Django Admin and
+# replaced it with log records only -- readable by any staff account,
+# deletable by a superuser, and gone entirely if nobody ships them
+# off-host. `adminapi.models.AdminAuditLog` is the durable replacement.
+#
+# Retention here is an order of magnitude longer than the probe retention
+# (30 days) and that gap is the point. Probe rows are telemetry: the newest
+# ones answer every question worth asking and the table grows by millions a
+# day. Audit rows are evidence: they grow by hundreds a day, and the
+# questions they answer -- "when did this account first start revealing
+# credentials", "who changed the free plan's tier in March" -- are asked
+# precisely about the distant past, usually after an incident makes someone
+# look. A year is the minimum that survives an annual review cycle.
+# ---------------------------------------------------------------------------
+
+# What `prune_audit_log` deletes past, by default.
+ADMIN_AUDIT_RETENTION_DAYS = env_int("ADMIN_AUDIT_RETENTION_DAYS", 365)
+
+# The floor it refuses to go below, whatever is passed on the command
+# line. Pruning audit history has to be deliberate and hard: a typo in a
+# cron entry must not be able to erase the trail. Overriding this is an
+# environment change, visible in config review, rather than a flag.
+ADMIN_AUDIT_MIN_RETENTION_DAYS = env_int("ADMIN_AUDIT_MIN_RETENTION_DAYS", 90)
+
+# Kill switch for the durable write. The structured log line is emitted
+# either way. Here for one case: a deployment whose database is read-only
+# or wedged, where losing the table write is better than losing the
+# request. Leave it on.
+ADMIN_AUDIT_PERSIST = env_bool("ADMIN_AUDIT_PERSIST", True)
+
+
+# ---------------------------------------------------------------------------
 # CORS -- for the admin SPA only.
 #
 # Scoped to /api/admin/ by CORS_URLS_REGEX so the mobile API's responses are
@@ -406,9 +524,12 @@ LOGGING = {
         # regardless of LOG_LEVEL: an audit trail that a log-level tweak
         # can silence is not an audit trail.
         #
-        # NOT YET DONE: these are log records, not rows in an append-only
-        # table, and by default they go to stdout where a staff account can
-        # read them and a superuser can delete them.
+        # These are now ALSO rows in the append-only `AdminAuditLog` table
+        # (P9), so losing this stream no longer loses the trail. The
+        # stream is still worth shipping: it is the copy an attacker who
+        # owns this host and its database cannot reach. The table is the
+        # copy that survives a handler nobody configured. Neither
+        # substitutes for the other.
         "proxycrack.audit": {
             "level": "INFO",
             "handlers": ["console"],

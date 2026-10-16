@@ -29,6 +29,8 @@ router.register("upload-batches", views.AdminUploadBatchViewSet, basename="uploa
 router.register("content", views.AdminContentViewSet, basename="content")
 router.register("usage-logs", views.AdminUsageLogViewSet, basename="usagelog")
 router.register("chains", views.AdminChainViewSet, basename="chain")
+# Hyphenated like the other multi-word prefixes above.
+router.register("audit-log", views.AdminAuditLogViewSet, basename="auditlog")
 
 urlpatterns = [
     path("auth/login/", views.AdminLoginView.as_view(), name="auth-login"),

@@ -21,6 +21,7 @@ from billing.models import (
     SubscriptionStatus,
     UsageLog,
 )
+from adminapi.models import AdminAuditLog
 from core.models import Content, ContentKind
 from proxies.models import Proxy, ProxyChain, ProxyProtocol, ProxyTier, UploadBatch
 
@@ -99,6 +100,44 @@ class AdminProxyFilter(django_filters.FilterSet):
     upload_batch = django_filters.ModelChoiceFilter(queryset=UploadBatch.objects.all())
     max_latency_ms = django_filters.NumberFilter(field_name="latency_ms", lookup_expr="lte")
 
+    # Health. `unprobed` is the one an operator reaches for first after an
+    # import -- "what has nothing measured yet" is a different and more
+    # actionable question than "what is dead".
+    max_p95_latency_ms = django_filters.NumberFilter(
+        field_name="latency_p95_ms", lookup_expr="lte"
+    )
+    min_success_rate = django_filters.NumberFilter(
+        field_name="success_rate", lookup_expr="gte"
+    )
+    max_success_rate = django_filters.NumberFilter(
+        field_name="success_rate", lookup_expr="lte"
+    )
+    min_quality_score = django_filters.NumberFilter(
+        field_name="quality_score", lookup_expr="gte"
+    )
+    max_quality_score = django_filters.NumberFilter(
+        field_name="quality_score", lookup_expr="lte"
+    )
+    min_consecutive_failures = django_filters.NumberFilter(
+        field_name="consecutive_failures", lookup_expr="gte"
+    )
+    unprobed = django_filters.BooleanFilter(
+        field_name="probe_count",
+        lookup_expr="exact",
+        method="filter_unprobed",
+        label="Only proxies with no probes in the rolling window",
+    )
+    checked_before = django_filters.IsoDateTimeFilter(
+        field_name="last_checked", lookup_expr="lt"
+    )
+
+    def filter_unprobed(self, queryset, name, value):
+        if value is None:
+            return queryset
+        return queryset.filter(probe_count=0) if value else queryset.exclude(
+            probe_count=0
+        )
+
     class Meta:
         model = Proxy
         # username / password / ss_method are EncryptedCharField and reject
@@ -112,6 +151,14 @@ class AdminProxyFilter(django_filters.FilterSet):
             "is_enabled",
             "upload_batch",
             "max_latency_ms",
+            "max_p95_latency_ms",
+            "min_success_rate",
+            "max_success_rate",
+            "min_quality_score",
+            "max_quality_score",
+            "min_consecutive_failures",
+            "unprobed",
+            "checked_before",
         ]
 
 
@@ -149,3 +196,37 @@ class AdminChainFilter(django_filters.FilterSet):
     class Meta:
         model = ProxyChain
         fields = ["user"]
+
+
+class AdminAuditLogFilter(django_filters.FilterSet):
+    """Filters for the audit trail: who, what, and when.
+
+    `actor` is the FK and `actor_email` is the denormalised copy, and both
+    are filterable on purpose. Once an account is deleted the FK is null
+    and only the email can find that person's history -- an audit log you
+    cannot query after the actor leaves answers the wrong half of the
+    question.
+    """
+
+    actor = django_filters.ModelChoiceFilter(queryset=User.objects.all())
+    actor_email = django_filters.CharFilter(
+        field_name="actor_email", lookup_expr="iexact"
+    )
+    action = django_filters.CharFilter(field_name="action", lookup_expr="exact")
+    target_type = django_filters.CharFilter(
+        field_name="target_type", lookup_expr="exact"
+    )
+    target_id = django_filters.CharFilter(field_name="target_id", lookup_expr="exact")
+    # Yields ?created_at_after= and ?created_at_before=.
+    created_at = django_filters.IsoDateTimeFromToRangeFilter(field_name="created_at")
+
+    class Meta:
+        model = AdminAuditLog
+        fields = [
+            "actor",
+            "actor_email",
+            "action",
+            "target_type",
+            "target_id",
+            "created_at",
+        ]

@@ -70,9 +70,11 @@ from adminapi.throttling import (
     AdminCSVUploadThrottle,
     AdminLoginEmailThrottle,
     AdminLoginIPThrottle,
+    AdminProbeThrottle,
 )
 from adminapi.filters import (
     MAX_IDS,
+    AdminAuditLogFilter,
     AdminChainFilter,
     AdminContentFilter,
     AdminPlanFilter,
@@ -85,7 +87,9 @@ from adminapi.filters import (
 )
 from adminapi.pagination import AdminPagination
 from adminapi.permissions import IsStaffUser
+from adminapi.models import AdminAuditLog
 from adminapi.serializers import (
+    AdminAuditLogSerializer,
     AdminChainSerializer,
     AdminContentSerializer,
     AdminMeSerializer,
@@ -98,6 +102,7 @@ from adminapi.serializers import (
     AdminUserSerializer,
     BulkDeleteSerializer,
     BulkEnableSerializer,
+    ProbeRequestSerializer,
     ProxyCSVUploadSerializer,
     SetPasswordSerializer,
     parse_batch_errors,
@@ -109,7 +114,16 @@ from billing.models import (
     UsageLog,
 )
 from core.models import Content
+from proxies.health import record_probe_results
 from proxies.importers import CSVImportError, import_proxies_from_csv
+from proxies.probing import (
+    DEFAULT_CONCURRENCY,
+    DEFAULT_TIMEOUT,
+    ProbeUnsupported,
+    get_prober,
+    probe_batch,
+    targets_for,
+)
 from proxies.models import (
     ChainHop,
     Proxy,
@@ -696,7 +710,19 @@ class AdminProxyViewSet(AdminModelViewSet):
 
     filterset_class = AdminProxyFilter
     search_fields = ("host", "country", "city")
-    ordering_fields = ("latency_ms", "last_checked", "host", "country", "id")
+    ordering_fields = (
+        "latency_ms",
+        "latency_p50_ms",
+        "latency_p95_ms",
+        "success_rate",
+        "quality_score",
+        "probe_count",
+        "consecutive_failures",
+        "last_checked",
+        "host",
+        "country",
+        "id",
+    )
     ordering = ("country", "city", "host")
     queryset = Proxy.objects.all()
 
@@ -713,6 +739,8 @@ class AdminProxyViewSet(AdminModelViewSet):
             return BulkDeleteSerializer
         if self.action == "upload_csv":
             return ProxyCSVUploadSerializer
+        if self.action == "probe":
+            return ProbeRequestSerializer
         return AdminProxyDetailSerializer
 
     def get_throttles(self):
@@ -726,6 +754,8 @@ class AdminProxyViewSet(AdminModelViewSet):
             return [AdminBulkThrottle()]
         if action == "upload_csv":
             return [AdminCSVUploadThrottle()]
+        if action == "probe":
+            return [AdminProbeThrottle()]
         return super().get_throttles()
 
     def _audit_credentials(self, instance, reason):
@@ -863,6 +893,114 @@ class AdminProxyViewSet(AdminModelViewSet):
             proxy_ids=ids,
         )
         return Response({"deleted": deleted})
+
+    @action(detail=False, methods=["post"], url_path="probe")
+    def probe(self, request):
+        """`{ids[]}` -> probe those proxies now and return what happened.
+
+        The normal path is the scheduled `probe_proxies` management
+        command. This endpoint exists for the one case a schedule cannot
+        serve: an operator has just fixed something, or has just been told
+        a provider is down, and needs an answer in the next five seconds
+        rather than at the next tick.
+
+        **Synchronous, and deliberately so.** A queue would be the textbook
+        answer, and a broker is an operational dependency -- one more thing
+        to deploy, monitor, secure and restore -- bought here for a button
+        that is pressed a few times a day. Instead the blast radius is
+        capped: `PROXY_PROBE_API_MAX_IDS` ids, a per-probe timeout, bounded
+        concurrency, and its own 30/hour throttle. When probe volume
+        outgrows that, `probe_proxies` is where the queue goes, and this
+        endpoint becomes an enqueue.
+
+        Disabled proxies are probed if asked for by id: the operator may
+        be deciding whether to re-enable one, and refusing to measure it
+        would be unhelpful. The command's bulk path still skips them.
+        """
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        ids = serializer.validated_data["ids"]
+
+        proxies = list(Proxy.objects.filter(pk__in=ids))
+        found = {proxy.pk for proxy in proxies}
+        missing = sorted(set(ids) - found)
+
+        timeout = float(
+            getattr(settings, "PROXY_PROBE_TIMEOUT_SECONDS", DEFAULT_TIMEOUT)
+        )
+        concurrency = int(
+            getattr(settings, "PROXY_PROBE_CONCURRENCY", DEFAULT_CONCURRENCY)
+        )
+
+        outcome = probe_batch(
+            get_prober(),
+            targets_for(proxies),
+            timeout=timeout,
+            concurrency=concurrency,
+        )
+        record_probe_results(outcome.results)
+
+        audit(
+            "admin_probe_run",
+            request=request,
+            requested=len(ids),
+            probed=len(outcome.results),
+            succeeded=outcome.succeeded,
+            failed=outcome.failed,
+            skipped=len(outcome.skipped),
+            proxy_ids=ids,
+        )
+
+        # Re-read so the response carries the health the probe just wrote,
+        # rather than the stale values loaded before it ran.
+        refreshed = {
+            proxy.pk: proxy for proxy in Proxy.objects.filter(pk__in=found)
+        }
+        results = [
+            {
+                "proxy": proxy_id,
+                "succeeded": result.succeeded,
+                "latency_ms": result.latency_ms,
+                "error_kind": result.error_kind or None,
+                "detail": result.detail or None,
+                "health": AdminProxyListSerializer(refreshed[proxy_id]).data
+                if proxy_id in refreshed
+                else None,
+            }
+            for proxy_id, result, _target in outcome.results
+        ]
+
+        return Response(
+            {
+                "requested": len(ids),
+                "probed": len(outcome.results),
+                "succeeded": outcome.succeeded,
+                "failed": outcome.failed,
+                # This prober cannot measure these -- an unsupported
+                # protocol, or a Shadowsocks cipher we do not implement
+                # (SS2022). They write no probe row and stay "unprobed"
+                # rather than being recorded as dead: a gap in our prober
+                # is not a verdict on the proxy. `code` separates the two
+                # causes so the SPA can say which.
+                "skipped": [
+                    {
+                        "proxy": pk,
+                        "reason": reason,
+                        "code": outcome.skipped_codes.get(
+                            pk, ProbeUnsupported.UNSUPPORTED_PROTOCOL
+                        ),
+                    }
+                    for pk, reason in outcome.skipped
+                ],
+                # The prober itself raised. Our bug, not the proxy's, so
+                # nothing was recorded against the proxy.
+                "errored": [
+                    {"proxy": pk, "error": error} for pk, error in outcome.errored
+                ],
+                "not_found": missing,
+                "results": results,
+            }
+        )
 
     @action(
         detail=False,
@@ -1011,6 +1149,40 @@ class AdminUsageLogViewSet(AdminReadOnlyViewSet):
     ordering_fields = ("session_start", "session_end", "bytes_up", "bytes_down", "id")
     ordering = ("-session_start",)
     queryset = UsageLog.objects.select_related("user")
+
+
+# ---------------------------------------------------------------------------
+# Audit log (read-only)
+# ---------------------------------------------------------------------------
+
+
+class AdminAuditLogViewSet(AdminReadOnlyViewSet):
+    """`GET /api/admin/audit-log/` -- the durable trail (P9).
+
+    Read-only at every level, and that is four independent layers rather
+    than one: `ReadOnlyModelViewSet` routes no write verbs, the queryset
+    refuses `update`/`delete`, the model refuses them on the instance, and
+    a database trigger refuses them underneath all of it. Any one of those
+    being removed by a later change still leaves three.
+
+    Deliberately **not** a `ModelViewSet` with permissions tightened. A
+    router registers create/update/destroy routes for a ModelViewSet
+    whatever the permissions say, and `adminapi.checks` verifies staff
+    access, not verb set -- so the destroy route would exist, reachable by
+    exactly the staff account an audit trail is meant to hold to account.
+
+    Staff-only, like everything here. Not superuser-only: a trail only
+    staff with the highest privilege can read is a trail that does not
+    deter the people most able to abuse it, and `is_staff` is already the
+    boundary for reading every row this table describes.
+    """
+
+    serializer_class = AdminAuditLogSerializer
+    filterset_class = AdminAuditLogFilter
+    search_fields = ("actor_email", "action", "target_id")
+    ordering_fields = ("created_at", "action", "actor_email", "id")
+    ordering = ("-created_at",)
+    queryset = AdminAuditLog.objects.select_related("actor")
 
 
 # ---------------------------------------------------------------------------

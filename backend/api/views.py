@@ -14,6 +14,7 @@ filter is applied, so a query parameter can only narrow the result set.
 import logging
 
 from django.db.models import Prefetch
+from django.utils import timezone
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.generics import CreateAPIView
@@ -22,6 +23,16 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
+# The audit seam lives in `adminapi` because that is where it was first
+# needed, not because it is admin-only. Importing it here does not couple
+# the mobile API to the admin one: `adminapi.audit` depends on nothing but
+# the audit model and the logging config.
+from adminapi.audit import audit
+from api.exceptions import (
+    ChainLengthExceeded,
+    ChainUnresolvable,
+    ProxyNotEntitled,
+)
 from api.filters import ProxyFilter
 from api.permissions import IsOwner
 from api.serializers import (
@@ -32,6 +43,7 @@ from api.serializers import (
     ProxyDetailSerializer,
     ProxyListSerializer,
     RegisterSerializer,
+    ResolvedHopSerializer,
     SubscriptionSerializer,
     UsageLogSerializer,
 )
@@ -44,6 +56,7 @@ from billing.entitlements import (
 from billing.models import Plan
 from core.models import Content, ContentKind
 from proxies.models import ChainHop, Proxy, ProxyChain
+from proxies.resolution import ChainResolutionError, resolve_chain
 
 logger = logging.getLogger("proxycrack.api")
 
@@ -86,8 +99,22 @@ class ProxyViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = (IsAuthenticated,)
     filterset_class = ProxyFilter
     search_fields = ("country", "city")
-    ordering_fields = ("latency_ms", "country", "city", "last_checked")
-    ordering = ("latency_ms",)
+    ordering_fields = (
+        "latency_ms",
+        "latency_p50_ms",
+        "latency_p95_ms",
+        "success_rate",
+        "quality_score",
+        "country",
+        "city",
+        "last_checked",
+    )
+    # Best-first by default, not fastest-first. `quality_score` folds
+    # reliability and latency together with reliability dominant, so the
+    # top of the list is the proxy most likely to carry a connection --
+    # which is not the same list as "lowest ping", and that difference is
+    # the entire point of the scoring model.
+    ordering = ("-quality_score",)
 
     def get_throttles(self):
         self.throttle_scope = (
@@ -110,12 +137,36 @@ class ProxyViewSet(viewsets.ReadOnlyModelViewSet):
         )
 
     def retrieve(self, request, *args, **kwargs):
+        """The mobile credential disclosure, and the busiest one there is.
+
+        D18 sends a client here once per hop on every connect and every
+        failover, so this endpoint -- not the admin console -- is where
+        most paid credentials actually leave the server. It was recording
+        a log line and nothing else, which meant the durable trail (P9)
+        covered the rare disclosure and missed the common one.
+
+        The log line below is kept byte-for-byte: existing tooling greps
+        it and the Phase 1 format is a contract of its own. The audit
+        call is purely additive -- no request, response, status code or
+        throttle changes -- so `/api/` stays frozen in every sense a
+        client can observe.
+        """
         instance = self.get_object()
         logger.info(
             "credential_access user=%s proxy=%s tier=%s",
             request.user.pk,
             instance.pk,
             instance.tier,
+        )
+        # Audit the access, never the value: proxy, actor and IP, with no
+        # credential anywhere in the payload.
+        audit(
+            "credential_access",
+            request=request,
+            proxy_id=instance.pk,
+            tier=instance.tier,
+            host=instance.host,
+            via="mobile_retrieve",
         )
         return Response(self.get_serializer(instance).data)
 
@@ -127,13 +178,15 @@ class ProxyViewSet(viewsets.ReadOnlyModelViewSet):
 
 class ProxyChainViewSet(viewsets.ModelViewSet):
     """A user's saved chains. Chain length and proxy tier are re-validated on
-    every write by `ProxyChainSerializer.validate_proxy_ids`."""
+    every write by `ProxyChainSerializer`."""
 
     serializer_class = ProxyChainSerializer
     permission_classes = (IsAuthenticated, IsOwner)
 
     def get_throttles(self):
-        if self.request.method not in ("GET", "HEAD", "OPTIONS"):
+        if getattr(self, "action", None) == "resolve":
+            self.throttle_scope = "chain_resolve"
+        elif self.request.method not in ("GET", "HEAD", "OPTIONS"):
             self.throttle_scope = "chain_write"
         else:
             self.throttle_scope = None
@@ -154,6 +207,69 @@ class ProxyChainViewSet(viewsets.ModelViewSet):
     def perform_destroy(self, instance):
         instance.hops.all().delete()
         instance.delete()
+
+    @action(detail=True, methods=["post"], url_path="resolve")
+    def resolve(self, request, pk=None):
+        """`POST /api/chains/{id}/resolve/` -- concrete proxies, right now.
+
+        This is the call the client makes immediately before building the
+        engine config, and again when a hop dies mid-session. A fixed hop
+        comes back as itself; a constrained hop comes back as whichever
+        healthy, entitled proxy currently scores highest for that slot,
+        with no proxy used twice in the chain.
+
+        POST rather than GET because the answer is a point-in-time
+        decision, not a representation of the chain: two calls a minute
+        apart can legitimately return different proxies, and anything that
+        caches this as a GET would pin a chain to a dead hop.
+
+        Entitlement is re-resolved here rather than trusted from write
+        time. A chain saved under a subscription that has since expired
+        must stop resolving, and this is the only place that can notice.
+
+        No credentials in the response -- see `ResolvedHopSerializer`.
+        """
+        chain = self.get_object()
+
+        try:
+            resolution = resolve_chain(chain, user=request.user)
+        except ChainResolutionError as exc:
+            logger.info(
+                "chain_resolution_failed user=%s chain=%s code=%s position=%s",
+                request.user.pk,
+                chain.pk,
+                exc.code,
+                exc.position,
+            )
+            raise _as_api_exception(exc)
+
+        return Response(
+            {
+                "chain": {"id": chain.pk, "name": chain.name},
+                "resolved_at": timezone.now(),
+                "hops": ResolvedHopSerializer(
+                    resolution.hops,
+                    many=True,
+                    context=self.get_serializer_context(),
+                ).data,
+            }
+        )
+
+
+def _as_api_exception(exc):
+    """Map a resolver failure onto the existing error envelope.
+
+    Entitlement failures reuse the Phase 1 exceptions so that "your plan
+    does not cover this" is one `error.code` on the write path and the
+    resolve path alike -- a client that already handles
+    `proxy_not_entitled` from `POST /api/chains/` needs no new branch.
+    Everything else is a 409: the request is fine, the inventory is not.
+    """
+    if exc.code == "chain_length_exceeded":
+        return ChainLengthExceeded(detail=exc.as_detail())
+    if exc.code == "hop_proxy_not_entitled":
+        return ProxyNotEntitled(detail=exc.as_detail())
+    return ChainUnresolvable(detail=exc.as_detail())
 
 
 # ---------------------------------------------------------------------------

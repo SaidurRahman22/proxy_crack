@@ -34,6 +34,7 @@ __all__ = [
     "AdminCSVUploadThrottle",
     "AdminLoginEmailThrottle",
     "AdminLoginIPThrottle",
+    "AdminProbeThrottle",
     "AdminScopedThrottle",
 ]
 
@@ -128,3 +129,18 @@ class AdminBulkThrottle(UserRateThrottle):
 
 class AdminCSVUploadThrottle(UserRateThrottle):
     scope = "admin_csv_upload"
+
+
+class AdminProbeThrottle(UserRateThrottle):
+    """Bounds operator-triggered probe runs.
+
+    Unlike the other scopes here this one is not primarily an anti-abuse
+    control -- it is a resource control. Each call holds a request worker
+    open while it makes up to `PROXY_PROBE_API_MAX_IDS` outbound
+    connections, and an operator refreshing a dashboard can exhaust the
+    pool without meaning anything by it. It also bounds the outbound
+    traffic we generate against a provider who may be rate-limiting us in
+    turn.
+    """
+
+    scope = "admin_probe"

@@ -60,3 +60,7 @@ Thumbs.db
 # Agent screenshots
 app/screen.png
 **/screen*.png
+
+# Playwright MCP session artifacts
+.playwright-mcp/
+admin/.playwright-mcp/

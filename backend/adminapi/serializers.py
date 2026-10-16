@@ -15,12 +15,14 @@ Two rules carry over from `api.serializers` and one is new:
 
 import re
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 from rest_framework import serializers
 
 from adminapi.exceptions import PrivilegeEscalationDenied
 from adminapi.filters import MAX_IDS
+from adminapi.models import AdminAuditLog
 from billing.models import (
     Plan,
     Subscription,
@@ -465,6 +467,13 @@ class AdminProxyListSerializer(serializers.ModelSerializer):
 
     `requires_credentials` is the boolean the operator actually needs in a
     table: whether this row carries credentials, without transporting them.
+
+    The health block rides on the list because it is not a secret -- it is
+    an aggregate of our own probe results -- and because a health dashboard
+    that needs a detail request per row is not a dashboard. Every one of
+    these fields is read-only: they are derived from `ProxyProbe` by
+    `proxies.health`, and an operator editing `success_rate` by hand would
+    be overwritten by the next probe run anyway.
     """
 
     requires_credentials = serializers.SerializerMethodField()
@@ -479,16 +488,34 @@ class AdminProxyListSerializer(serializers.ModelSerializer):
             "country",
             "city",
             "tier",
-            "is_alive",
             "is_enabled",
+            # --- health, all derived -------------------------------
+            "is_alive",
             "latency_ms",
             "last_checked",
+            "success_rate",
+            "probe_count",
+            "consecutive_failures",
+            "latency_p50_ms",
+            "latency_p95_ms",
+            "quality_score",
             "requires_credentials",
             "upload_batch",
             "created_at",
             "updated_at",
         )
-        read_only_fields = ("id", "requires_credentials", "created_at", "updated_at")
+        read_only_fields = (
+            "id",
+            "requires_credentials",
+            "created_at",
+            "updated_at",
+            "success_rate",
+            "probe_count",
+            "consecutive_failures",
+            "latency_p50_ms",
+            "latency_p95_ms",
+            "quality_score",
+        )
 
     def get_requires_credentials(self, obj):
         return bool(obj.username or obj.password)
@@ -571,6 +598,33 @@ class BulkDeleteSerializer(_BulkIdsSerializer):
 
 class ProxyCSVUploadSerializer(serializers.Serializer):
     file = serializers.FileField()
+
+
+class ProbeRequestSerializer(serializers.Serializer):
+    """`POST /api/admin/proxies/probe/` -- "check these now".
+
+    Capped far below `MAX_IDS` because this endpoint probes
+    **synchronously in the request worker**. Fifty proxies against a ten
+    second timeout is already most of a minute of held worker in the worst
+    case, and a thousand would be a self-inflicted outage. The scheduled
+    `probe_proxies` command is the bulk path; this is the button beside a
+    filtered table.
+    """
+
+    ids = serializers.ListField(
+        child=serializers.IntegerField(min_value=1), allow_empty=False
+    )
+
+    def validate_ids(self, value):
+        cap = int(getattr(settings, "PROXY_PROBE_API_MAX_IDS", 50))
+        unique = list(dict.fromkeys(value))
+        if len(unique) > cap:
+            raise serializers.ValidationError(
+                f"At most {cap} proxies per probe run; this endpoint probes "
+                f"synchronously. Use the probe_proxies management command "
+                f"for anything larger."
+            )
+        return unique
 
 
 # ---------------------------------------------------------------------------
@@ -685,3 +739,49 @@ class AdminChainSerializer(serializers.ModelSerializer):
 
     def get_length(self, obj):
         return len(obj.hops.all())
+
+
+# ---------------------------------------------------------------------------
+# Audit log (read-only)
+# ---------------------------------------------------------------------------
+
+
+class AdminAuditLogSerializer(serializers.ModelSerializer):
+    """One audit row, as the console reads it.
+
+    `actor` is the live FK and goes null when the account is deleted;
+    `actor_email` is the copy taken at write time and does not. Both are
+    exposed deliberately -- a row where `actor` is null and `actor_email`
+    is set is not missing data, it is the record of someone whose account
+    has since been removed, and that distinction is the point of keeping
+    two columns.
+
+    Every field is read-only. The viewset is read-only too, and the model
+    refuses writes, and the database refuses them under that -- this is
+    simply the outermost of the four.
+    """
+
+    actor = UserSummarySerializer(read_only=True)
+    actor_deleted = serializers.SerializerMethodField()
+
+    class Meta:
+        model = AdminAuditLog
+        fields = (
+            "id",
+            "action",
+            "actor",
+            "actor_email",
+            "actor_deleted",
+            "target_type",
+            "target_id",
+            "changes",
+            "payload",
+            "ip",
+            "user_agent",
+            "created_at",
+        )
+        read_only_fields = fields
+
+    def get_actor_deleted(self, obj):
+        """True when the row outlived the account that made it."""
+        return obj.actor_id is None and bool(obj.actor_email)

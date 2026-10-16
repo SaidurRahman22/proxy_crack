@@ -176,6 +176,149 @@ See `Pre-Flight/INSTALL-LOG.md` for the full setup record and the gotchas hit.
 
 ---
 
+## 6.5 Roadmap execution — started 2026-10-15
+
+Full analysis in [roadmap.md](roadmap.md). Items are being built **sequentially**, not in
+parallel: R1 and R2 both add fields to `Proxy`, so concurrent agents would collide on the
+migration chain.
+
+| # | Item | Why it beats proxychains | Status |
+|---|---|---|---|
+| **R1** | **Health checking, quality scoring, positional failover** | proxychains discovers a dead hop by failing on it — no probe, no failover, no quality notion | ✅ **DONE** — 438 tests (193 new), verified |
+| R2 | ASN / jurisdiction / operator diversity scoring | proxychains will happily build a 3-hop chain inside one datacenter and say nothing | queued |
+| R3 | Kill switch, DNS through tunnel, leak tests | proxychains leaks on failure; `proxy_dns` is a known-weak hack | blocked on Phase 3 engine |
+| R4 | Latency-budgeted chain composition | proxychains makes you hand-edit a config and find out by trying | queued |
+| R5 | Per-app split tunnelling | `VpnService` supports it natively; proxychains needs a shell prefix per command | blocked on Phase 3 |
+| R6 | UDP support + HTTP-hop warning | proxychains is TCP-only; SOCKS5/SS carry UDP, HTTP does not (see P7) | queued |
+| R7 | Chain presets by purpose | proxychains assumes you already know what you are doing | queued |
+| R8 | Per-hop observability | proxychains tells you nothing when a chain is slow | partly in R1 |
+
+### R1 design decisions (2026-10-16)
+
+| # | Decision | Why |
+|---|---|---|
+| **D13** | Reliability **multiplies** the score; latency only scales it within a 40% band | Makes latency genuinely secondary. A proxy dropping a third of its connections cannot climb back by being fast. |
+| **D14** | Reliability is a **Wilson lower bound**, z=1.0 (not the textbook 1.96) | Without it, 1/1 outranks 198/200. At z=1.96 a single success scores 0.21 — *below* an unprobed proxy, which is perverse. z=1.0 gives 0.50/0.91/0.98 at 1/10/50 probes. |
+| **D15** | Unprobed proxy scores **50**, not 0 or 100 | 0 makes every fresh CSV import unselectable; 100 beats everything actually measured. |
+| **D16** | `is_alive` is **asymmetric** — 3 consecutive failures to die, 1 success to revive | A flapping proxy is better punished by its success rate than by a boolean. Verified: score stays depressed after revival. |
+| **D17** | Constrained hops resolve **most-constrained-first**, not in position order | With the no-reuse rule this is bipartite matching. Position order fails chains that are satisfiable. Heuristic; Hopcroft-Karp slots in later. |
+| **D18** | `/api/chains/{id}/resolve/` returns proxy **identities + a `credentials_url` per hop**, never credentials inline | A 3-hop resolve returning credentials is three sets of paid credentials in one request, outside the 60/hour throttle and the per-disclosure audit line — exactly the bulk disclosure D11 forbids. Costs 3 extra round trips per connect. |
+
+### ✅ P14 RESOLVED 2026-10-16 — Shadowsocks prober shipped
+
+`proxies/shadowsocks.py` implements a real AEAD client (`aes-256-gcm`, `aes-128-gcm`,
+`chacha20-ietf-poly1305`). SS proxies are probed, not skipped. **628 tests pass.**
+
+**Error-kind mapping, including where it refuses to guess:**
+
+| Observed | Kind | |
+|---|---|---|
+| TCP connect fails | `refused`/`timeout`/`dns` | distinguishable — happens before SS logic |
+| Reply that does not authenticate | `auth_failed` | only a wrong key/cipher or non-SS endpoint does this |
+| Decryptable reply | success | proves password, cipher **and** upstream path |
+| **Silence (EOF / deadline / RST)** | **`unverifiable`** (new kind) | **genuinely indistinguishable — the result says so** |
+
+EOF, timeout and RST deliberately collapse onto one kind: surfacing them separately would give an
+operator two different-looking verdicts for one indistinguishable situation.
+
+**Crypto vector provenance** — every vector pinned to a source outside this repo:
+`EVP_BytesToKey` from the OpenSSL 3.5.7 CLI (exact command recorded); HKDF-SHA1 from RFC 5869
+Appendix A TC5/TC6; AES-GCM from the GCM spec; ChaCha20-Poly1305 from RFC 8439 §2.8.2.
+
+⚠️ **Known weakness, stated rather than hidden:** there is **no published known-answer vector for
+the Shadowsocks composition** (subkey derivation + nonce sequence + chunk framing + request
+header) — the spec is prose and ships none. The composition is therefore tested against a second
+implementation written from the spec inside the test file, sharing no code with the production
+one. **Agreement between two implementations written from the same prose is weaker evidence than
+a published vector.** Recorded in the test module docstring.
+
+**SS2022 (`2022-blake3-*`) is not implemented** — reported as `unsupported_cipher`, distinct from
+a failure. An unsupported cipher is our gap, not a dead proxy.
+
+---
+
+<details>
+<summary>Original P14 writeup (resolved — kept for context)</summary>
+
+**SS is one of the three protocols in D4, and the prober skips it entirely.** Shadowsocks is
+designed to be indistinguishable from random bytes: the server sends no greeting and no reply to
+anything it cannot decrypt, and a *wrong password produces exactly the same silence as a correct
+one*. There is no handshake to observe, so a real probe must be a real AEAD client.
+
+All three shortcuts were correctly refused:
+- bare TCP connect recorded as success → a green tick for a dead container
+- recorded as failure → marks every working SS proxy dead and removes it from all chains
+- shipping untested crypto
+
+**Current behaviour:** SS proxies are skipped, write no probe row, and keep the unprobed score of
+50. `probe_proxies` reports the skip count. Fixing it is one entry in `SocketProber.handler_for`.
+
+</details>
+
+### ✅ P15 RESOLVED 2026-10-16 — the diagnosis was fixed, not the semantics
+
+Excluding unprobed proxies from a latency guarantee is still correct. What changed is that the
+operator can now tell the two causes apart, because they have **opposite remedies**:
+
+- each health stage reports `excluded_measured` vs `excluded_unprobed`
+- new code `hop_unsatisfied_unprobed`, raised **only when relaxing the threshold would actually
+  produce candidates** — so a chain emptied by country or entitlement is not blamed on probing
+- `ChainHop.allow_unprobed` opt-in (default off) for bootstrapping a fresh inventory
+- **"Unprobed" is `probe_count = 0`, not `latency_p95_ms IS NULL`.** A proxy that failed 50 probes
+  also has a null p95; keying on the null would have re-admitted the worst proxies in the
+  inventory under a flag promising "nothing known yet".
+
+### ✅ P9 RESOLVED 2026-10-16 — durable audit log, append-only verified
+
+`AdminAuditLog`, written from the existing `audit()` seam so all 15 call sites gained persistence
+without re-instrumenting a single view.
+
+**Append-only enforced at four independent layers.** I attacked it directly; all five refused:
+
+| Attack | Result |
+|---|---|
+| model `.save()` on an existing row | refused |
+| queryset `.update()` — never loads an instance | refused |
+| model `.delete()` | refused |
+| **raw SQL `UPDATE`** | **refused by database trigger** |
+| **raw SQL `DELETE`** | **refused — 30-day hard floor in the migration** |
+
+The trigger caught a real design trap: Django's `SET_NULL` on user deletion *is* an UPDATE, so a
+blanket ban broke actor survival — and the obvious "fix" would have been `CASCADE`, erasing the
+history of exactly the people you most need a record of. The carve-out permits only
+`actor_id → NULL` with all nine other columns pinned, and a test fails if a column is added later
+without updating the trigger.
+
+Retention: 365 days (vs 30 for probes), dry-run by default, floor of 90 days, and the prune
+records itself **after** deleting so the record sits outside its own blast radius.
+
+### D19 — mobile credential endpoint also audited (agent's judgement call, accepted)
+
+`/api/proxies/{id}/` was wired into the audit seam too. Not requested, and it touches `/api/`.
+The reasoning is sound: D18 sends a client there once per hop on every connect and every
+failover, so that endpoint — not the console — is where most paid credentials actually leave the
+server. Auditing only the console would have covered the rare path and missed the common one.
+Purely additive; the Phase 1 log line is byte-for-byte unchanged.
+
+### Known limitations carried forward
+
+| | |
+|---|---|
+| **PostgreSQL trigger reviewed but never executed** | Dev DB is SQLite, so only that branch is exercised. Needs PG 11+ for `EXECUTE FUNCTION`. Validate before the Postgres move. |
+| **`TransactionTestCase` / `manage.py flush`** | Both use `DELETE FROM`, which the trigger refuses for rows under 30 days. Nothing hits it today; a future test that audits something will fail at teardown with a message naming the migration. |
+
+### Positions taken
+
+- **Ship the lightweight per-process mode on Linux too.** For Linux power users that is
+  genuinely the right tool, and shipping it buys credibility with exactly the audience that
+  knows what proxychains is. Do not force TUN on people who want a shim.
+- **Never claim anonymity guarantees.** Chaining through commercial proxies bought under one
+  account with one payment trail is **not** Tor. The honest description is *layered egress
+  routing*. Overclaiming is a legal and reputational risk.
+- **No "free unlimited" tier.** The credentials are the cost base; free must be strictly bounded
+  or the unit economics invert.
+- **Do not write our own TUN/IP stack** — months of subtle bugs. Xray (D9) covers it.
+
 ## 7. Session log
 
 ### 2026-10-15

@@ -111,12 +111,13 @@ class MainActivity : FlutterActivity() {
 
             "start" -> start(call, result)
 
+            // The off switch. Local, unconditional, and incapable of
+            // failing in a way the caller has to handle: whatever happens
+            // here, the answer is "we asked". A `stop` that could throw —
+            // or that a caller could decide not to send — is a tunnel
+            // without an off switch.
             "stop" -> {
-                startService(
-                    Intent(this, VpnConnectionService::class.java).apply {
-                        action = VpnConnectionService.ACTION_DISCONNECT
-                    }
-                )
+                stopTunnel()
                 result.success(true)
             }
 
@@ -126,20 +127,64 @@ class MainActivity : FlutterActivity() {
 
             "engineVersion" -> result.success(XrayBridge.version())
 
+            // This app's own UID, for the `process` routing rule that keeps
+            // our API traffic out of the chain. Answered here rather than
+            // guessed in Dart: `Process.myUid()` is the only authority.
+            "appUid" -> result.success(android.os.Process.myUid())
+
             // Hands a generated config to libXray's `testXray`, which builds
             // an instance and closes it without starting. The way to check
             // the config generator against the real parser with no TUN.
+            //
+            // Off the main thread: it parses a config and constructs an
+            // engine instance, and this now runs on the connect path rather
+            // than only in a debug check.
             "validateConfig" -> {
                 val config = call.argument<String>("config")
                 if (config.isNullOrEmpty()) {
                     result.error("unknown", "No config supplied.", null)
                 } else {
-                    result.success(XrayBridge.testXray(config))
+                    validateOffThread(config, result)
                 }
             }
 
             else -> result.notImplemented()
         }
+    }
+
+    /**
+     * Asks the service to tear down.
+     *
+     * `startService` can throw — a background start on O+, a service the
+     * system has already reaped — and every one of those throws means the
+     * same thing: there is no live tunnel for this intent to reach. So the
+     * failure path settles the state bus itself, rather than leaving the UI
+     * waiting on a confirmation that can never arrive.
+     */
+    private fun stopTunnel() {
+        try {
+            startService(
+                Intent(this, VpnConnectionService::class.java).apply {
+                    action = VpnConnectionService.ACTION_DISCONNECT
+                }
+            )
+        } catch (t: Throwable) {
+            Log.w(TAG, "could not reach the tunnel service; reporting it down", t)
+            VpnStateBus.resetStats()
+            VpnStateBus.publish(VpnStateBus.STATE_DISCONNECTED)
+        }
+    }
+
+    private fun validateOffThread(config: String, result: MethodChannel.Result) {
+        Thread({
+            val error = try {
+                XrayBridge.testXray(config)
+            } catch (t: Throwable) {
+                t.message ?: t.javaClass.simpleName
+            }
+            // A MethodChannel.Result must be answered on the main thread.
+            runOnUiThread { result.success(error) }
+        }, "proxy-crack-validate").start()
     }
 
     private fun requestConsent(result: MethodChannel.Result) {

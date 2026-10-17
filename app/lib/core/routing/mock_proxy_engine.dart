@@ -39,6 +39,17 @@ class MockProxyEngine implements ProxyEngine {
   Timer? _ticker;
   bool _disposed = false;
 
+  /// Bumped by [disconnect], checked after every simulated delay.
+  ///
+  /// The mock honours the same rule the real engine does: a connect the
+  /// user has asked to abandon must not go on to report itself connected.
+  /// Without this the mock would reach `connected` a few hundred
+  /// milliseconds after a cancel, which is the very bug the real engine was
+  /// fixed for — and the mock is what every widget test exercises.
+  int _generation = 0;
+
+  bool _isStale(int generation) => _disposed || generation != _generation;
+
   /// The mock pretends to be a full-device tunnel so the UI exercises the
   /// system-wide copy path. A desktop engine without a tunnel driver would
   /// answer false here instead.
@@ -88,6 +99,8 @@ class MockProxyEngine implements ProxyEngine {
     if (_status.isConnected && _status.chain == chain) return;
     if (_status.isBusy) return;
 
+    final generation = ++_generation;
+
     if (chain.isEmpty) {
       const failure = EngineException(
         EngineFailure.hopUnreachable,
@@ -118,7 +131,7 @@ class MockProxyEngine implements ProxyEngine {
       ),
     );
     await Future<void>.delayed(_scaled(420));
-    if (_disposed) return;
+    if (_isStale(generation)) return;
 
     // Each hop is dialled through the previous one, so setup time -- like
     // latency -- compounds. That is the point of the simulation.
@@ -136,7 +149,7 @@ class MockProxyEngine implements ProxyEngine {
       );
 
       await Future<void>.delayed(_scaled(320 + hop.proxy.latencyMs));
-      if (_disposed) return;
+      if (_isStale(generation)) return;
 
       if (!hop.proxy.isAlive) {
         _ticker?.cancel();
@@ -178,7 +191,7 @@ class MockProxyEngine implements ProxyEngine {
       ),
     );
     await Future<void>.delayed(_scaled(380));
-    if (_disposed) return;
+    if (_isStale(generation)) return;
 
     final connectedAt = DateTime.now();
     _emitStatus(
@@ -224,6 +237,9 @@ class MockProxyEngine implements ProxyEngine {
 
   @override
   Future<void> disconnect() async {
+    // Bumped before anything can await, so a connect in flight is already
+    // invalid by the time it next looks.
+    _generation++;
     if (_status.state == EngineState.disconnected) return;
     _ticker?.cancel();
     _ticker = null;

@@ -36,6 +36,7 @@ class XrayConfigException implements Exception {
 class TunnelPlan {
   const TunnelPlan({
     required this.configJson,
+    required this.validationConfigJson,
     required this.mtu,
     required this.ipv4Address,
     required this.ipv4Prefix,
@@ -54,6 +55,28 @@ class TunnelPlan {
   ///
   /// **Contains hop credentials. Never log it, never write it to disk.**
   final String configJson;
+
+  /// The same config, prepared for libXray's `testXray`.
+  ///
+  /// `testXray` builds a real engine instance and closes it without starting
+  /// it, which is how a generated config is checked against the real parser
+  /// before any TUN exists. Two things are therefore removed:
+  ///
+  /// * the **`tun` inbound**, because building it means adopting a file
+  ///   descriptor that `VpnService.establish()` has not produced yet — and
+  ///   the entire point of validating here is that it happens *before* the
+  ///   TUN is committed;
+  /// * the **`xray.tun.fd` env entry**, whose value is still the runtime
+  ///   placeholder.
+  ///
+  /// Everything a chain can get wrong — an outbound, a cipher, a
+  /// `dialerProxy` tag that names nothing, a `qType` of the wrong JSON
+  /// shape, a routing rule the parser rejects — lives in the parts that are
+  /// kept. The TUN inbound that is dropped is a fixed constant, identical on
+  /// every connect, already proven on a device.
+  ///
+  /// **Contains hop credentials.**
+  final String validationConfigJson;
 
   final int mtu;
 
@@ -225,10 +248,19 @@ class XrayConfigBuilder {
         ProxyProtocol.http => 'http',
       };
 
-  TunnelPlan build(ProxyChain chain, {ChainCredentials? credentials}) {
-    final config = buildConfigMap(chain, credentials: credentials);
+  TunnelPlan build(
+    ProxyChain chain, {
+    ChainCredentials? credentials,
+    String? exemptProcessName,
+  }) {
+    final config = buildConfigMap(
+      chain,
+      credentials: credentials,
+      exemptProcessName: exemptProcessName,
+    );
     return TunnelPlan(
       configJson: jsonEncode(config),
+      validationConfigJson: jsonEncode(validationConfigFrom(config)),
       mtu: mtu,
       ipv4Address: tunIpv4Address,
       ipv4Prefix: tunIpv4Prefix,
@@ -248,6 +280,7 @@ class XrayConfigBuilder {
   Map<String, Object?> buildConfigMap(
     ProxyChain chain, {
     ChainCredentials? credentials,
+    String? exemptProcessName,
   }) {
     if (chain.isEmpty) {
       throw const XrayConfigException(
@@ -318,8 +351,44 @@ class XrayConfigBuilder {
       ],
       'outbounds': outbounds,
       'dns': _buildDns(),
-      'routing': _buildRouting(exitTag: exitTag, supportsUdp: chain.supportsUdp),
+      'routing': _buildRouting(
+        exitTag: exitTag,
+        supportsUdp: chain.supportsUdp,
+        exemptProcessName: exemptProcessName,
+      ),
     };
+  }
+
+  /// Strips a config down to what libXray's `testXray` can build.
+  ///
+  /// See [TunnelPlan.validationConfigJson] for why the TUN inbound and the
+  /// file-descriptor env entry come out. Operates on a copy — the config
+  /// that is actually run is never touched.
+  static Map<String, Object?> validationConfigFrom(
+    Map<String, Object?> config,
+  ) {
+    final copy = Map<String, Object?>.of(config);
+
+    final env = copy['env'];
+    if (env is Map) {
+      final trimmed = Map<String, Object?>.of(env.cast<String, Object?>())
+        ..remove(tunFdEnvKey);
+      if (trimmed.isEmpty) {
+        copy.remove('env');
+      } else {
+        copy['env'] = trimmed;
+      }
+    }
+
+    final inbounds = copy['inbounds'];
+    if (inbounds is List) {
+      copy['inbounds'] = <Object?>[
+        for (final inbound in inbounds)
+          if (!(inbound is Map && inbound['protocol'] == 'tun')) inbound,
+      ];
+    }
+
+    return copy;
   }
 
   Map<String, Object?> _buildHopOutbound(
@@ -413,10 +482,58 @@ class XrayConfigBuilder {
   Map<String, Object?> _buildRouting({
     required String exitTag,
     required bool supportsUdp,
+    String? exemptProcessName,
   }) {
     return <String, Object?>{
       'domainStrategy': 'AsIs',
       'rules': <Map<String, Object?>>[
+        // --- this app's own traffic, and nothing else ------------------
+        //
+        // Without this rule the app's calls to our own API enter the TUN
+        // like everything else and are carried by the chain. When the chain
+        // cannot carry traffic, the app can no longer reach the backend —
+        // and the app is the only thing that can turn the tunnel off. That
+        // is a deadlock, and it is how a kill switch becomes a bricked
+        // device.
+        //
+        // Keyed on the **process**, not on the API host. A `direct` rule
+        // naming our API would publish to the user's ISP that this device
+        // runs this product — the single disclosure the product exists to
+        // prevent — and would exempt *anyone's* traffic to that host, not
+        // just ours. `process` matches one UID: ours.
+        //
+        // How it works (verified against the shipped binaries, not docs):
+        // `LibXray.registerProcessFinder(finder, sdk)` installs a callback
+        // that Xray calls with a connection's 4-tuple; libXray's
+        // `controller_android.go` turns our `long` answer into the decimal
+        // UID string, and `app/router.ProcessNameMatcher` compares that
+        // string to the entries of this rule's `process` list with an exact
+        // match. So the value here is our own UID, as decimal text.
+        //
+        // ⚠️ **Android only.** `registerProcessFinder` and `FindProcess`
+        // are compiled under `//go:build android`; on Windows, Linux and
+        // macOS this rule can never match and the platform needs its own
+        // answer — most likely binding our own sockets outside the tunnel,
+        // since every desktop target controls its own process and has no
+        // equivalent of `VpnService.protect()`. Each desktop engine passes
+        // null here until it has one, which emits no rule at all rather
+        // than a rule that silently matches nothing.
+        //
+        // It is deliberately the **first** rule, ahead of the DNS hijack.
+        // Exempting our API's TCP connection but still sending our own name
+        // lookups into a chain that cannot carry them would leave exactly
+        // the deadlock this rule exists to remove, for any API URL that is
+        // a hostname rather than an address. The connection is already
+        // going direct, and its TLS SNI already carries the hostname, so
+        // resolving that same name outside the tunnel discloses nothing the
+        // exemption had not already conceded.
+        if (exemptProcessName != null && exemptProcessName.isNotEmpty)
+          <String, Object?>{
+            'type': 'field',
+            'inboundTag': <String>[tunInboundTag],
+            'process': <String>[exemptProcessName],
+            'outboundTag': directOutboundTag,
+          },
         // §8 layer 2, and the single most valuable rule in the file: catches
         // apps that hard-code 8.8.8.8 and ignore the system resolver. It is
         // first so that DNS survives the UDP black-hole rule below.

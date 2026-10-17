@@ -3,6 +3,7 @@ package com.nenobot.proxy_crack
 import android.util.Log
 import libXray.DialerController
 import libXray.LibXray
+import libXray.ProcessFinder
 import org.json.JSONObject
 
 /**
@@ -68,6 +69,85 @@ object XrayBridge {
             LibXray.registerDialerController(controller)
             LibXray.registerListenerController(controller)
             controllerRegistered = true
+        }
+    }
+
+    // --- per-app routing (Android only) ------------------------------------
+
+    /**
+     * Answers "which UID owns this connection?" for the `process` routing
+     * rule. Null while no tunnel is up.
+     *
+     * Set by the service, because the only way to answer is
+     * `ConnectivityManager.getConnectionOwnerUid`, and the platform grants
+     * that to the **active `VpnService`** — not to arbitrary callers.
+     */
+    @Volatile
+    var uidLookup: ((String, String, Int, String, Int) -> Int)? = null
+
+    @Volatile
+    private var processFinderRegistered = false
+
+    /**
+     * Called by the engine on a Go thread, once per new connection, while a
+     * `process` routing rule exists.
+     *
+     * Returns `-1` when we cannot tell, which libXray passes through as a
+     * UID that matches no rule — so an unanswerable lookup means "route it
+     * like everything else", never "send it outside the tunnel".
+     *
+     * Must not throw: this crosses a cgo boundary and an exception here
+     * takes the engine with it.
+     */
+    private val processFinder = object : ProcessFinder {
+        override fun findProcessByConnection(
+            network: String,
+            srcIP: String,
+            srcPort: Long,
+            destIP: String,
+            destPort: Long
+        ): Long {
+            return try {
+                val uid = uidLookup?.invoke(
+                    network,
+                    srcIP,
+                    srcPort.toInt(),
+                    destIP,
+                    destPort.toInt()
+                ) ?: -1
+                uid.toLong()
+            } catch (t: Throwable) {
+                Log.w(TAG, "process lookup failed", t)
+                -1L
+            }
+        }
+    }
+
+    /**
+     * Registers the per-app routing hook once per process.
+     *
+     * [sdkInt] is `Build.VERSION.SDK_INT`. libXray uses it to decide
+     * whether to read the `/proc/net` tables itself (below API 30) or to call this
+     * finder (API 30 and up), so passing the real value is not optional.
+     *
+     * Unlike `registerDialerController`, libXray *assigns* rather than
+     * appends here, so re-registering would be harmless — it is still done
+     * once, for symmetry and to keep the two hooks reasoned about the same
+     * way.
+     */
+    fun ensureProcessFinderRegistered(sdkInt: Int) {
+        if (processFinderRegistered) return
+        synchronized(this) {
+            if (processFinderRegistered) return
+            try {
+                LibXray.registerProcessFinder(processFinder, sdkInt.toLong())
+                processFinderRegistered = true
+            } catch (t: Throwable) {
+                // Per-app routing is unavailable; the config's process rule
+                // then matches nothing. Worth a log, not worth refusing a
+                // tunnel over.
+                Log.w(TAG, "registerProcessFinder failed", t)
+            }
         }
     }
 

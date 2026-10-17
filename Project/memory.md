@@ -452,6 +452,51 @@ CONNECT from one to another. It is a ten-minute check that decides whether the p
 
 </details>
 
+### ✅ S1-S3 DONE 2026-10-17 — the off switch, pre-flight, and API exemption
+
+**Root cause of the bricked emulator, found precisely:** `VpnConnectionService.teardown()` called
+`XrayBridge.stopXray()` **synchronously on the main thread**. That is a JNI call into the Go
+runtime, and a wedged engine never returns — so `tunnel.close()`, the one line that frees the
+device, sat behind an engine that might never answer. The notification's Disconnect lands in the
+same `onStartCommand` on the same thread, so it was blocked identically. `am force-stop` was the
+only way out, exactly as observed.
+
+**Four more ways the off switch could be refused, all found and closed:**
+
+| Where | Was |
+|---|---|
+| `AppController.toggleConnection` | early-returned while busy — **tapping the control during a connect did nothing at all** |
+| `ConnectButton` | `enabled = !status.isBusy` — **greyed itself out while capturing traffic** |
+| `AndroidVpnEngine.disconnect` | early-returned on cached state; `stop` had no timeout; shared one completer with `connect` |
+| `AppController.connect` | no cancellation — a sequence parked on an HTTP call resumed and started a tunnel **after** the user cancelled |
+
+Teardown now does local work synchronously, posts a **2 s deadline**, and asks the engine to stop
+on a worker thread. Whichever arrives first closes the fd. **A leaked engine process is accepted;
+a bricked device is not.**
+
+**Pre-flight** (`chain_preflight.dart`, pure Dart so it ports to desktop): build config →
+`testXray` → walk the chain over the real network → **then** consent → **then** establish the TUN.
+A chain that cannot work never raises the system VPN prompt. P25 is a first-class outcome
+(`providerBlocked`, not `hopUnreachable`) because the remedy is a different *provider*.
+**Shadowsocks is `inconclusive`, and inconclusive passes** — per P14 a right and a wrong key look
+identical, so "could not check" must never become "refused".
+
+**Process exemption proven decisively:** with the tunnel up, a pull-to-refresh reached Django at
+`10.0.2.2:8000` — an emulator-local alias **no Webshare proxy could ever route to**. It went
+direct via the `process` rule. The rule value is the **UID as a decimal string** (`"10217"`),
+matched by exact string compare in `ProcessNameMatcher` — not a package name.
+
+### ⚠️ P26 (new): our own DNS may still go through the chain
+
+The process rule exempts our traffic *if those packets carry our UID*. On Android the system
+resolver performs lookups on the app's behalf, and it is unconfirmed whether
+`getConnectionOwnerUid` reports our UID or netd's.
+
+**Dev never exercises this** — the API base is `10.0.2.2:8000`, a bare address with no DNS. With a
+**hostname-based production API URL**, a broken chain could block name resolution and recreate a
+weaker form of the deadlock. **Test against a hostname API before production.** Pre-flight and
+local teardown cover it meanwhile.
+
 ### Positions taken
 
 - **Ship the lightweight per-process mode on Linux too.** For Linux power users that is

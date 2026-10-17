@@ -47,6 +47,13 @@ enum ConnectStage {
   /// it can be resolved.
   savingChain,
 
+  /// The engine is checking the chain before any tunnel exists: the config
+  /// through the real parser, then a hop-by-hop walk over the physical
+  /// network. Named separately because it is the stage a chain that cannot
+  /// work now fails at, and the user should see that it failed *before*
+  /// anything was routed.
+  preflight,
+
   /// `POST /api/chains/{id}/resolve/`.
   resolving,
 
@@ -170,6 +177,11 @@ class AppController extends ChangeNotifier {
   int _credentialsFetched = 0;
   int get credentialsFetched => _credentialsFetched;
 
+  /// Bumped by [disconnect]. Every `await` in [connect] checks it, so a
+  /// connect sequence parked on an unreachable API cannot resume into
+  /// starting a tunnel after the user has asked to stop.
+  int _connectGeneration = 0;
+
   // --- Browser filters ---------------------------------------------------
   String _query = '';
   String get query => _query;
@@ -285,6 +297,9 @@ class AppController extends ChangeNotifier {
     _chain = ProxyChain.empty(name: 'My route');
     _savedChainId = null;
     _diversity = null;
+    // Same bump as a disconnect: a connect sequence belonging to the signed
+    // out account must not resume into starting a tunnel.
+    _connectGeneration++;
     _connectStage = ConnectStage.idle;
     _connectFailure = null;
     _credentialsFetched = 0;
@@ -504,6 +519,12 @@ class AppController extends ChangeNotifier {
     _connectFailure = null;
     _credentialsFetched = 0;
 
+    // Captured so every `await` below can ask whether the user has since
+    // asked to stop. Without it, a disconnect pressed during the credential
+    // fetch is honoured by the engine and then immediately undone by this
+    // method carrying on to start one.
+    final generation = ++_connectGeneration;
+
     ChainCredentials? credentials;
     try {
       // Connecting saves nothing. Previously this created a chain first,
@@ -515,14 +536,20 @@ class AppController extends ChangeNotifier {
       final resolved = await repository.resolveProxies(
         _chain.hops.map((h) => h.proxy.id).toList(growable: false),
       );
+      if (_isStaleConnect(generation)) return;
 
       _setStage(ConnectStage.fetchingCredentials);
       credentials = await _fetchCredentials(resolved);
+      if (_isStaleConnect(generation)) return;
 
-      _setStage(ConnectStage.startingEngine);
+      // The engine checks the chain before it commits a tunnel, so this
+      // stage covers the pre-flight as well as the start.
+      _setStage(ConnectStage.preflight);
       await engine.connect(_chain, credentials: credentials);
     } on ApiFailure catch (error) {
-      _connectFailure = error;
+      // A connect the user abandoned must not leave an error card behind:
+      // they asked to stop, and they got what they asked for.
+      if (!_isStaleConnect(generation)) _connectFailure = error;
       _setStage(ConnectStage.idle);
       return;
     } on EngineException {
@@ -534,11 +561,22 @@ class AppController extends ChangeNotifier {
       // one, so the credentials become unreachable the moment the engine is
       // done with them.
       credentials = null;
-      if (_connectStage == ConnectStage.startingEngine) {
+      if (_connectStage == ConnectStage.preflight ||
+          _connectStage == ConnectStage.startingEngine) {
         _setStage(ConnectStage.idle);
       }
     }
     _setStage(ConnectStage.idle);
+  }
+
+  /// True once [disconnect] has been called under an in-flight connect.
+  ///
+  /// Calling it also lands the UI back on idle, because the sequence that
+  /// owns the stage is about to return.
+  bool _isStaleConnect(int generation) {
+    if (generation == _connectGeneration) return false;
+    _setStage(ConnectStage.idle);
+    return true;
   }
 
   Future<ChainCredentials> _fetchCredentials(ResolvedChain resolved) async {
@@ -550,15 +588,42 @@ class AppController extends ChangeNotifier {
     return credentials;
   }
 
-  Future<void> disconnect() => engine.disconnect();
+  /// The off switch.
+  ///
+  /// Nothing in here awaits the API, and nothing in here is conditional on
+  /// state that only arrives over the network. It abandons any connect
+  /// sequence in flight — including one parked on an HTTP call that will
+  /// never answer — and then tells the engine to stop.
+  ///
+  /// It is safe to call at any time, from any state, however many times.
+  Future<void> disconnect() async {
+    // Bumped *before* the engine call: by the time anything can await, the
+    // in-flight connect is already invalid.
+    _connectGeneration++;
+    _connectStage = ConnectStage.idle;
+    _connectFailure = null;
+    _credentialsFetched = 0;
+    notifyListeners();
+    await engine.disconnect();
+  }
 
+  /// What the one big control does.
+  ///
+  /// **A disconnect is never refused.** The old guard returned early while
+  /// busy, which meant that during a connect attempt — the exact moment a
+  /// chain can take the device's network away — tapping the control did
+  /// nothing at all. Anything other than a settled, idle, disconnected
+  /// state now means the user is asking to stop, and stopping is what
+  /// happens.
   Future<void> toggleConnection() async {
-    if (_status.isBusy || _connectStage != ConnectStage.idle) return;
-    if (_status.isConnected) {
+    final wantsOff = _status.isConnected ||
+        _status.isBusy ||
+        _connectStage != ConnectStage.idle;
+    if (wantsOff) {
       await disconnect();
-    } else {
-      await connect();
+      return;
     }
+    await connect();
   }
 
   /// Session accounting.

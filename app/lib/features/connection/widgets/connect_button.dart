@@ -15,10 +15,20 @@ class ConnectButton extends StatefulWidget {
     super.key,
     required this.status,
     required this.onPressed,
+    this.isWorking = false,
   });
 
   final EngineStatus status;
   final VoidCallback? onPressed;
+
+  /// True while the app is working on a connect but the engine has not been
+  /// reached yet — resolving the chain, fetching credentials, pre-flighting.
+  ///
+  /// Found on a device: without it the control reports the *engine's* state,
+  /// which during a retry is still the previous `error`, so the button read
+  /// "RETRY" while a connect was already running. A user who wants to stop
+  /// that connect is then looking at a control that offers to start one.
+  final bool isWorking;
 
   @override
   State<ConnectButton> createState() => _ConnectButtonState();
@@ -43,8 +53,15 @@ class _ConnectButtonState extends State<ConnectButton>
     _syncPulse();
   }
 
+  /// What the control should *look* like, which is not always what the
+  /// engine's own state says — see [ConnectButton.isWorking].
+  EngineState get _effectiveState =>
+      widget.isWorking && widget.status.state != EngineState.disconnecting
+          ? EngineState.connecting
+          : widget.status.state;
+
   void _syncPulse() {
-    final shouldRun = widget.status.state == EngineState.connecting &&
+    final shouldRun = _effectiveState == EngineState.connecting &&
         MotionScope.allowAmbient(context);
     if (shouldRun && !_pulse.isAnimating) {
       _pulse.repeat(reverse: true);
@@ -64,7 +81,7 @@ class _ConnectButtonState extends State<ConnectButton>
   Widget build(BuildContext context) {
     final tokens = context.tokens;
     final scheme = Theme.of(context).colorScheme;
-    final state = widget.status.state;
+    final state = _effectiveState;
 
     final (Color fill, Color ring, Color content, IconData icon, String action) =
         switch (state) {
@@ -75,12 +92,16 @@ class _ConnectButtonState extends State<ConnectButton>
           Icons.power_settings_new,
           'Connect',
         ),
+      // The label names the action a tap performs, not the state. While a
+      // connect is in flight that action is "cancel it", and the control
+      // says so — a button reading "Connecting" invites the user to wait
+      // for something they may need to stop.
       EngineState.connecting => (
           scheme.secondary,
           tokens.accent,
           tokens.subtleForeground,
-          Icons.sync,
-          'Connecting',
+          Icons.close,
+          'Cancel',
         ),
       EngineState.connected => (
           scheme.surfaceContainer,
@@ -105,7 +126,18 @@ class _ConnectButtonState extends State<ConnectButton>
         ),
     };
 
-    final enabled = widget.onPressed != null && !widget.status.isBusy;
+    // 🔴 Never disabled because the engine is busy.
+    //
+    // It used to be. That meant the one control that turns the tunnel off
+    // was dead for the entire window in which a half-built chain can take
+    // the device's network away — the window in which a user most needs
+    // it. A VPN whose off switch greys itself out while it is capturing
+    // traffic is the failure mode this product cannot ship with.
+    //
+    // `disconnecting` is the one exception, and only because the teardown
+    // it would re-trigger is already running and bounded.
+    final enabled = widget.onPressed != null &&
+        widget.status.state != EngineState.disconnecting;
 
     return LayoutBuilder(
       builder: (context, constraints) {

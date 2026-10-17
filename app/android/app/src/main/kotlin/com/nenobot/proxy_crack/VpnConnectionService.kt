@@ -16,7 +16,11 @@ import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.os.Process
+import android.system.OsConstants
 import android.util.Log
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.util.concurrent.atomic.AtomicBoolean
 import org.json.JSONObject
 
 /**
@@ -73,6 +77,23 @@ class VpnConnectionService : VpnService() {
 
         private const val WATCHDOG_INTERVAL_MS = 4_000L
         private const val STATS_INTERVAL_MS = 1_000L
+
+        /**
+         * How long teardown gives the engine to stop before closing the
+         * TUN file descriptor anyway.
+         *
+         * `stopXray()` is a synchronous call into the Go runtime. A wedged
+         * engine — one blocked dialling a hop that will never answer —
+         * does not return from it. Waiting for it before closing the
+         * descriptor means the user's disconnect never completes, the
+         * interface stays up, nothing drains it, and the device has no
+         * network and no way out from inside the app. That is exactly the
+         * failure this constant exists to make impossible.
+         *
+         * A leaked engine is a smaller problem than a bricked device, and
+         * the service is stopping anyway, so the process goes with it.
+         */
+        private const val ENGINE_STOP_DEADLINE_MS = 2_000L
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -100,6 +121,19 @@ class VpnConnectionService : VpnService() {
     private var connectivity: ConnectivityManager? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
+    /**
+     * Teardown guards.
+     *
+     * [tearingDown] makes a teardown idempotent — the notification action,
+     * the UI, `onRevoke` and `onDestroy` can all arrive at once, and only
+     * the first should do anything. [finishing] makes the closing half
+     * idempotent too, because it is raced on purpose: the engine's worker
+     * thread and the deadline both aim at it, and whichever wins, the
+     * descriptor is closed exactly once.
+     */
+    private val tearingDown = AtomicBoolean(false)
+    private val finishing = AtomicBoolean(false)
+
     private val watchdog = object : Runnable {
         override fun run() {
             if (tunnel == null) return
@@ -123,7 +157,19 @@ class VpnConnectionService : VpnService() {
         // Before anything slow. A foreground service that has not called
         // startForeground() within a few seconds of being started is killed
         // with ForegroundServiceDidNotStartInTimeException.
-        startForegroundCompat(buildNotification(VpnStateBus.STATE_CONNECTING))
+        //
+        // A disconnect gets its own notification text rather than the
+        // connecting one: the shade should not flash "Connecting" at a user
+        // who just pressed Disconnect.
+        startForegroundCompat(
+            buildNotification(
+                if (intent?.action == ACTION_DISCONNECT) {
+                    VpnStateBus.STATE_DISCONNECTING
+                } else {
+                    VpnStateBus.STATE_CONNECTING
+                }
+            )
+        )
 
         when (intent?.action) {
             ACTION_DISCONNECT -> {
@@ -159,6 +205,13 @@ class VpnConnectionService : VpnService() {
     }
 
     private fun connect(intent: Intent) {
+        // A CONNECT can land on an instance that has already torn down, if
+        // a reconnect beats `onDestroy`. Without this the guards would
+        // still be latched and the *next* disconnect would be a no-op — a
+        // tunnel with no off switch, which is the whole defect.
+        tearingDown.set(false)
+        finishing.set(false)
+
         val configJson = intent.getStringExtra(EXTRA_CONFIG)
         if (configJson.isNullOrEmpty()) {
             teardown(
@@ -217,6 +270,8 @@ class VpnConnectionService : VpnService() {
         // Must be in place before the engine opens its first socket.
         XrayBridge.protector = { fd -> protect(fd) }
         XrayBridge.ensureControllerRegistered()
+        XrayBridge.uidLookup = ::ownerUidOf
+        XrayBridge.ensureProcessFinderRegistered(Build.VERSION.SDK_INT)
         XrayBridge.setProcessDns(PROCESS_DNS)
 
         val runtimeConfig = try {
@@ -372,36 +427,96 @@ class VpnConnectionService : VpnService() {
     }
 
     override fun onDestroy() {
-        if (tunnel != null) {
-            teardown(VpnStateBus.STATE_DISCONNECTED, null, null)
-        }
+        teardown(VpnStateBus.STATE_DISCONNECTED, null, null)
         super.onDestroy()
     }
 
     /**
-     * §5.3 item 8: stop the engine, *then* close the descriptor, *then*
-     * leave the foreground. Closing the descriptor first leaves the engine
-     * reading a dead fd.
+     * Brings the interface down. **Nothing in here can be blocked by the
+     * network, the engine, or the backend.**
+     *
+     * §5.3 item 8 still holds — stop the engine, *then* close the
+     * descriptor, *then* leave the foreground, because closing the
+     * descriptor first leaves the engine reading a dead fd — but it now
+     * holds *on a deadline*. The ordering is a courtesy to the engine; the
+     * descriptor closing is not negotiable.
+     *
+     * What changed, and why:
+     *
+     * * `stopXray()` used to run **synchronously on the main thread**. It
+     *   is a JNI call into the Go runtime, and a wedged engine does not
+     *   return from it. Everything below it — including `tunnel.close()` —
+     *   was therefore gated on an engine that might never answer. A user
+     *   pressing Disconnect, or the notification's Disconnect action, got
+     *   nothing, and the only remaining way out was
+     *   `adb shell am force-stop`. That is the worst failure a VPN app can
+     *   have, and it happened.
+     * * The engine stop now runs on a worker thread. The descriptor is
+     *   closed either when the engine confirms it has stopped, or when
+     *   [ENGINE_STOP_DEADLINE_MS] expires — whichever comes first.
+     * * The final half is idempotent and can be entered from either path,
+     *   so neither can double-close or double-publish.
      */
     private fun teardown(state: String, detail: String?, failure: String?) {
-        if (tunnel != null) {
+        if (!tearingDown.compareAndSet(false, true)) return
+
+        // Everything in this block is local, synchronous and incapable of
+        // blocking: cancel timers, stop watching the network, and tell the
+        // UI what is happening.
+        handler.removeCallbacks(watchdog)
+        handler.removeCallbacks(statsTicker)
+        unregisterNetworkCallback()
+
+        val hadTunnel = tunnel != null
+        if (hadTunnel) {
             VpnStateBus.publish(
                 VpnStateBus.STATE_DISCONNECTING,
                 detail = "Closing the tunnel"
             )
         }
 
-        handler.removeCallbacks(watchdog)
-        handler.removeCallbacks(statsTicker)
-        unregisterNetworkCallback()
+        val hadEngine = engineAlive
+        engineAlive = false
 
-        if (engineAlive) {
-            XrayBridge.stopXray()
-            engineAlive = false
+        // Close the descriptor no later than the deadline, whatever the
+        // engine does. Posted before the engine is even asked, so a worker
+        // thread that never starts cannot defeat it either.
+        val finish = Runnable { finishTeardown(state, detail, failure) }
+        handler.postDelayed(finish, ENGINE_STOP_DEADLINE_MS)
+
+        if (!hadEngine) {
+            handler.removeCallbacks(finish)
+            finishTeardown(state, detail, failure)
+            return
         }
-        XrayBridge.resetProcessDns()
-        XrayBridge.protector = null
 
+        Thread({
+            try {
+                XrayBridge.stopXray()
+                XrayBridge.resetProcessDns()
+            } catch (t: Throwable) {
+                Log.w(TAG, "stopping the engine failed; closing anyway", t)
+            }
+            handler.post {
+                handler.removeCallbacks(finish)
+                finishTeardown(state, detail, failure)
+            }
+        }, "proxy-crack-engine-stop").start()
+    }
+
+    /**
+     * Closes the TUN and stops the service. Runs exactly once per teardown,
+     * from whichever of the engine's completion or the deadline arrives
+     * first.
+     */
+    private fun finishTeardown(state: String, detail: String?, failure: String?) {
+        if (!finishing.compareAndSet(false, true)) return
+
+        XrayBridge.protector = null
+        XrayBridge.uidLookup = null
+
+        // The one line that actually frees the device. It is reached on
+        // every path, including the one where the engine never answered.
         try {
             tunnel?.close()
         } catch (t: Throwable) {
@@ -415,6 +530,58 @@ class VpnConnectionService : VpnService() {
 
         stopForegroundCompat()
         stopSelf()
+    }
+
+    // --- per-app routing ---------------------------------------------------
+
+    /**
+     * Which UID owns the connection the engine is about to route.
+     *
+     * Feeds the `process` routing rule that keeps **this app's own API
+     * traffic out of the chain**. Without it, the app's calls to our
+     * backend are carried by the chain they are trying to build; when the
+     * chain cannot carry traffic, the app cannot reach the backend, and the
+     * only thing that can turn the tunnel off is the thing the tunnel has
+     * cut off.
+     *
+     * `getConnectionOwnerUid` is API 29+ and is granted to the **active
+     * `VpnService`**, which is why this lives on the service rather than in
+     * `XrayBridge`.
+     *
+     * Returns `Process.INVALID_UID` (-1) when the platform will not say.
+     * That matches no rule, so the connection is routed through the chain
+     * like any other — an unanswerable lookup can never turn into a leak.
+     *
+     * Runs on a Go thread, once per new connection. It is a binder round
+     * trip, so it is only paid at all because the generated config carries
+     * a `process` rule; a config without one never calls this.
+     */
+    private fun ownerUidOf(
+        network: String,
+        srcIP: String,
+        srcPort: Int,
+        destIP: String,
+        destPort: Int
+    ): Int {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return -1
+        val manager = connectivity
+            ?: getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            ?: return -1
+        val protocol = when (network) {
+            "tcp" -> OsConstants.IPPROTO_TCP
+            "udp" -> OsConstants.IPPROTO_UDP
+            else -> return -1
+        }
+        return try {
+            manager.getConnectionOwnerUid(
+                protocol,
+                InetSocketAddress(InetAddress.getByName(srcIP), srcPort),
+                InetSocketAddress(InetAddress.getByName(destIP), destPort)
+            )
+        } catch (t: Throwable) {
+            // Unparseable address, a platform that refuses, a revoked VPN.
+            -1
+        }
     }
 
     // --- network changes ---------------------------------------------------
@@ -580,6 +747,7 @@ class VpnConnectionService : VpnService() {
                 if (hopCount > 0) "Connected - $hopCount hop${if (hopCount == 1) "" else "s"}"
                 else "Connected"
             VpnStateBus.STATE_ERROR -> "Traffic blocked"
+            VpnStateBus.STATE_DISCONNECTING -> "Disconnecting"
             else -> "Connecting"
         }
 
@@ -590,6 +758,7 @@ class VpnConnectionService : VpnService() {
             }
             VpnStateBus.STATE_ERROR ->
                 "The engine stopped. Nothing is leaving the device unprotected."
+            VpnStateBus.STATE_DISCONNECTING -> "Closing the tunnel"
             else -> "Building the chain"
         }
 

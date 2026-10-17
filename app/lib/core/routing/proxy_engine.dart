@@ -36,6 +36,23 @@ enum EngineFailure {
   /// A hop refused the connection or timed out during handshake.
   hopUnreachable,
 
+  /// A hop's provider refused a connection to the *next* hop as a matter of
+  /// policy — HTTP 403, or SOCKS5 "not allowed by ruleset".
+  ///
+  /// P25. Providers block connections back into their own IP ranges, so two
+  /// consecutive hops bought from the same provider can never chain however
+  /// healthy both are. Kept separate from [hopUnreachable] because the
+  /// remedy is a different *provider*, not a different proxy or a retry, and
+  /// reporting it as a generic connection failure sends the user looking in
+  /// entirely the wrong place.
+  providerBlocked,
+
+  /// The engine's own parser refused the generated configuration.
+  ///
+  /// Always our bug, never the user's, and it is caught before a tunnel
+  /// exists.
+  configRejected,
+
   /// The server rejected the credentials for a hop.
   authenticationFailed,
 

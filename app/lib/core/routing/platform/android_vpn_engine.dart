@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 
 import '../../../data/models/proxy_chain.dart';
 import '../../../data/models/proxy_credentials.dart';
+import '../chain_preflight.dart';
 import '../proxy_engine.dart';
 import '../xray_config_builder.dart';
 
@@ -26,9 +27,15 @@ class AndroidVpnEngine implements ProxyEngine {
     MethodChannel? methodChannel,
     EventChannel? statusChannel,
     EventChannel? statsChannel,
+    ChainPreflight Function()? preflightFactory,
+    this.connectTimeout = defaultConnectTimeout,
+    this.disconnectTimeout = defaultDisconnectTimeout,
+    this.stopCallTimeout = defaultStopCallTimeout,
+    this.validateTimeout = defaultValidateTimeout,
   })  : _methods = methodChannel ?? const MethodChannel(methodChannelName),
         _statusEvents = statusChannel ?? const EventChannel(statusChannelName),
-        _statsEvents = statsChannel ?? const EventChannel(statsChannelName) {
+        _statsEvents = statsChannel ?? const EventChannel(statsChannelName),
+        _preflightFactory = preflightFactory ?? ChainPreflight.new {
     _attach();
   }
 
@@ -39,10 +46,37 @@ class AndroidVpnEngine implements ProxyEngine {
   /// A three-hop chain dials three handshakes in series, each through the
   /// last. Generous, but not unbounded: a hung dial must not leave the UI
   /// spinning forever.
-  static const Duration connectTimeout = Duration(seconds: 60);
-  static const Duration disconnectTimeout = Duration(seconds: 15);
+  static const Duration defaultConnectTimeout = Duration(seconds: 60);
+
+  /// How long [disconnect] waits for the service to confirm the tunnel is
+  /// down before reporting it down anyway.
+  ///
+  /// Short on purpose. The service closes its file descriptor on its own
+  /// deadline whether or not the engine cooperates, so waiting longer here
+  /// buys nothing and costs the user a spinner over a device they believe
+  /// is still captured.
+  static const Duration defaultDisconnectTimeout = Duration(seconds: 5);
+
+  /// Ceiling on the `stop` platform call itself.
+  ///
+  /// Not the same thing as [defaultDisconnectTimeout]: a `MethodChannel`
+  /// call whose platform side is wedged never returns, and awaiting it
+  /// without a bound would make the off switch depend on a healthy platform
+  /// thread.
+  static const Duration defaultStopCallTimeout = Duration(seconds: 3);
+
+  /// Ceiling on `testXray`, which parses a config and builds an instance.
+  static const Duration defaultValidateTimeout = Duration(seconds: 10);
+
+  /// Injectable so a test can prove the *structure* — that every wait is
+  /// bounded — in milliseconds instead of in wall-clock seconds.
+  final Duration connectTimeout;
+  final Duration disconnectTimeout;
+  final Duration stopCallTimeout;
+  final Duration validateTimeout;
 
   final XrayConfigBuilder _configBuilder;
+  final ChainPreflight Function() _preflightFactory;
   final MethodChannel _methods;
   final EventChannel _statusEvents;
   final EventChannel _statsEvents;
@@ -63,7 +97,27 @@ class AndroidVpnEngine implements ProxyEngine {
   /// and reattaches it to every status it publishes.
   ProxyChain? _chain;
 
-  Completer<void>? _settling;
+  /// Completed when the service reports a settled state for a connect.
+  Completer<void>? _connectSettling;
+
+  /// Kept apart from [_connectSettling] deliberately. They used to be one
+  /// field, so a disconnect raised during a connect overwrote the connect's
+  /// completer and left it to time out 60 seconds later — the off switch
+  /// quietly stranding the thing it interrupted.
+  Completer<void>? _disconnectSettling;
+
+  /// Bumped by [disconnect]. A connect sequence that started before the
+  /// bump abandons itself rather than carrying on to establish a tunnel the
+  /// user has already asked to stop.
+  int _connectGeneration = 0;
+
+  ChainPreflight? _preflight;
+
+  /// This app's own UID, as the decimal string the `process` routing rule
+  /// matches. Resolved once; the UID cannot change while the process lives.
+  String? _processName;
+  bool _processNameResolved = false;
+
   bool _disposed = false;
 
   @override
@@ -185,20 +239,32 @@ class AndroidVpnEngine implements ProxyEngine {
     _status = next;
     if (!_statusController.isClosed) _statusController.add(next);
 
-    final settling = _settling;
-    if (settling != null && !settling.isCompleted) {
+    final connecting = _connectSettling;
+    if (connecting != null && !connecting.isCompleted) {
       switch (next.state) {
         case EngineState.connected:
         case EngineState.disconnected:
-          settling.complete();
+          connecting.complete();
         case EngineState.error:
-          settling.completeError(
+          connecting.completeError(
             EngineException(next.failure ?? EngineFailure.unknown, next.detail),
           );
         case EngineState.connecting:
         case EngineState.disconnecting:
           break;
       }
+    }
+
+    // A disconnect settles only on `disconnected`. It deliberately does not
+    // settle on `error`: the service publishes an error *while holding the
+    // interface closed* when the engine dies under it (fail closed), and
+    // treating that as "the tunnel is down" would report a device still
+    // captured as free.
+    final disconnecting = _disconnectSettling;
+    if (disconnecting != null &&
+        !disconnecting.isCompleted &&
+        next.state == EngineState.disconnected) {
+      disconnecting.complete();
     }
   }
 
@@ -213,26 +279,60 @@ class AndroidVpnEngine implements ProxyEngine {
   static EngineFailure _failureFromWire(String value) => switch (value) {
         'permissionDenied' => EngineFailure.permissionDenied,
         'hopUnreachable' => EngineFailure.hopUnreachable,
+        'providerBlocked' => EngineFailure.providerBlocked,
+        'configRejected' => EngineFailure.configRejected,
         'authenticationFailed' => EngineFailure.authenticationFailed,
         'entitlementRejected' => EngineFailure.entitlementRejected,
         'networkUnavailable' => EngineFailure.networkUnavailable,
         _ => EngineFailure.unknown,
       };
 
+  /// A connect is stale once [disconnect] has been called under it.
+  bool _isStale(int generation) => _disposed || generation != _connectGeneration;
+
+  /// Brings the tunnel up, in an order chosen so that nothing irreversible
+  /// happens until the chain has shown it can carry a connection.
+  ///
+  /// 1. build the config,
+  /// 2. hand it to the engine's own parser (`testXray`, no TUN),
+  /// 3. walk the chain hop by hop over the physical network,
+  /// 4. only then ask for VPN consent,
+  /// 5. only then establish the TUN and move the default route.
+  ///
+  /// Steps 2 and 3 exist because of a real incident: the TUN was
+  /// established and the default route moved *first*, and the engine then
+  /// discovered it could not reach hop 2. The chain carried nothing, fail
+  /// closed correctly held the interface up, and the device lost all
+  /// connectivity with the app — the only thing that can turn the tunnel
+  /// off — unable to reach its own backend.
+  ///
+  /// Fail closed is unchanged **after** step 5. This moves *when* the
+  /// tunnel is committed, not whether a live tunnel is allowed to leak.
   @override
   Future<void> connect(ProxyChain chain, {ChainCredentials? credentials}) async {
     if (_status.isConnected && _status.chain == chain) return;
     if (_status.isBusy) return;
+
+    final generation = ++_connectGeneration;
+
+    // The UID the `process` routing rule needs, so this app's own API calls
+    // are not carried by the chain they are trying to build.
+    final processName = await _appProcessName();
+    if (_isStale(generation)) return;
 
     // Build the config before asking for anything: a chain that cannot be
     // expressed should fail here, with a precise message, rather than after
     // the user has approved a VPN prompt.
     final TunnelPlan plan;
     try {
-      plan = _configBuilder.build(chain, credentials: credentials);
+      plan = _configBuilder.build(
+        chain,
+        credentials: credentials,
+        exemptProcessName: processName,
+      );
     } on XrayConfigException catch (error) {
-      _failNow(EngineFailure.hopUnreachable, error.message, chain: chain);
-      throw EngineException(EngineFailure.hopUnreachable, error.message);
+      _failNow(EngineFailure.configRejected, error.message, chain: chain);
+      throw EngineException(EngineFailure.configRejected, error.message);
     }
 
     _chain = chain;
@@ -240,7 +340,55 @@ class AndroidVpnEngine implements ProxyEngine {
       EngineStatus(
         state: EngineState.connecting,
         chain: chain,
-        progress: 0,
+        progress: 0.05,
+        detail: 'Checking the route configuration',
+      ),
+    );
+
+    // --- step 2: the engine's own parser, with no TUN ------------------
+    final configError = await _validateConfig(plan.validationConfigJson);
+    if (_isStale(generation)) return;
+    if (configError != null) {
+      final detail =
+          'The tunnel engine rejected this route before it was started: '
+          '$configError';
+      _failNow(EngineFailure.configRejected, detail, chain: chain);
+      throw EngineException(EngineFailure.configRejected, detail);
+    }
+
+    // --- step 3: walk the chain on the physical network ----------------
+    _publish(
+      EngineStatus(
+        state: EngineState.connecting,
+        chain: chain,
+        progress: 0.2,
+        detail: chain.length > 1
+            ? 'Checking hop 2 is reachable through hop 1'
+            : 'Checking hop 1 answers',
+      ),
+    );
+
+    final preflight = _preflightFactory();
+    _preflight = preflight;
+    final PreflightResult probe;
+    try {
+      probe = await preflight.run(chain, credentials: credentials);
+    } finally {
+      if (identical(_preflight, preflight)) _preflight = null;
+    }
+    if (_isStale(generation)) return;
+    if (!probe.isViable) {
+      final failure = _failureFor(probe.outcome);
+      _failNow(failure, probe.detail, chain: chain);
+      throw EngineException(failure, probe.detail);
+    }
+
+    // --- step 4: consent ------------------------------------------------
+    _publish(
+      EngineStatus(
+        state: EngineState.connecting,
+        chain: chain,
+        progress: 0.45,
         detail: 'Requesting tunnel permission',
       ),
     );
@@ -254,6 +402,7 @@ class AndroidVpnEngine implements ProxyEngine {
         granted =
             await _methods.invokeMethod<bool>('requestPermission') ?? false;
       }
+      if (_isStale(generation)) return;
       if (!granted) {
         const detail =
             'Android needs your permission to route this device through the '
@@ -267,13 +416,14 @@ class AndroidVpnEngine implements ProxyEngine {
       throw EngineException(EngineFailure.permissionDenied, detail);
     }
 
+    // --- step 5: commit -------------------------------------------------
     final settling = Completer<void>();
-    _settling = settling;
+    _connectSettling = settling;
 
     try {
       await _methods.invokeMethod<void>('start', plan.toMethodArguments());
     } on PlatformException catch (error) {
-      _settling = null;
+      _connectSettling = null;
       final detail = error.message ?? 'The tunnel service refused to start.';
       _failNow(_failureFromWire(error.code), detail, chain: chain);
       throw EngineException(_failureFromWire(error.code), detail);
@@ -291,9 +441,21 @@ class AndroidVpnEngine implements ProxyEngine {
       _failNow(EngineFailure.hopUnreachable, detail, chain: chain);
       throw const EngineException(EngineFailure.hopUnreachable, detail);
     } finally {
-      if (identical(_settling, settling)) _settling = null;
+      if (identical(_connectSettling, settling)) _connectSettling = null;
     }
   }
+
+  static EngineFailure _failureFor(PreflightOutcome outcome) =>
+      switch (outcome) {
+        PreflightOutcome.providerBlocked => EngineFailure.providerBlocked,
+        PreflightOutcome.authenticationFailed =>
+          EngineFailure.authenticationFailed,
+        PreflightOutcome.hopUnreachable => EngineFailure.hopUnreachable,
+        // Never reached: both of these are viable outcomes.
+        PreflightOutcome.reachable ||
+        PreflightOutcome.inconclusive =>
+          EngineFailure.unknown,
+      };
 
   void _failNow(
     EngineFailure failure,
@@ -310,58 +472,129 @@ class AndroidVpnEngine implements ProxyEngine {
     );
   }
 
+  /// Tears the tunnel down. **Unconditional, local, and bounded.**
+  ///
+  /// Three properties, each of which was missing and each of which was a
+  /// way to brick a device:
+  ///
+  /// * **Unconditional.** No early return on cached state. If this object
+  ///   believes it is already disconnected while a service somewhere is
+  ///   still holding a TUN, believing itself is precisely the wrong move —
+  ///   the stop is cheap and idempotent, so it is always sent.
+  /// * **Local.** Nothing here awaits an HTTP call, a credential fetch or
+  ///   any value that only arrives over the network. The only thing it
+  ///   touches is a platform channel into our own process.
+  /// * **Bounded.** Both the platform call and the wait for confirmation
+  ///   have their own ceilings, so a wedged engine or a wedged platform
+  ///   thread delays the off switch by seconds rather than forever. The
+  ///   service closes its file descriptor on its own deadline regardless of
+  ///   what is observed here.
   @override
   Future<void> disconnect() async {
-    if (_status.state == EngineState.disconnected) return;
+    // Abandon any connect sequence in flight first, so it cannot go on to
+    // establish a tunnel after the user has asked for one to stop, and so a
+    // pre-flight walk sitting on a socket gives it up immediately.
+    _connectGeneration++;
+    _preflight?.cancel();
+    _preflight = null;
+
+    _publish(
+      EngineStatus(
+        state: EngineState.disconnecting,
+        chain: _chain,
+        detail: 'Closing the tunnel',
+      ),
+    );
 
     final settling = Completer<void>();
-    _settling = settling;
+    _disconnectSettling = settling;
     try {
-      await _methods.invokeMethod<void>('stop');
+      await _invokeQuietly('stop', timeout: stopCallTimeout);
       await settling.future.timeout(disconnectTimeout);
     } on TimeoutException {
-      // The service is gone or wedged. Report disconnected rather than
-      // leaving the UI stuck on "Disconnecting" forever; the service's own
-      // teardown is idempotent.
-      _publish(const EngineStatus.idle());
-    } on PlatformException {
-      _publish(const EngineStatus.idle());
+      // The service never confirmed. It closes its descriptor on its own
+      // deadline whatever happens here, and leaving the UI on
+      // "Disconnecting" forever would hide the off switch behind a spinner.
     } finally {
-      if (identical(_settling, settling)) _settling = null;
+      if (identical(_disconnectSettling, settling)) _disconnectSettling = null;
       _chain = null;
+      _publish(const EngineStatus.idle());
     }
   }
 
-  Future<void> _invokeQuietly(String method) async {
+  /// Best effort, and bounded: a platform call with a wedged other side
+  /// never returns on its own.
+  Future<void> _invokeQuietly(String method, {Duration? timeout}) async {
     try {
-      await _methods.invokeMethod<void>(method);
-    } on PlatformException {
-      // Best effort.
-    } on MissingPluginException {
-      // Best effort.
+      final call = _methods.invokeMethod<void>(method);
+      await (timeout == null ? call : call.timeout(timeout));
+    } on Object {
+      // Every failure mode here — no handler, a platform exception, a
+      // timeout — means the same thing to the caller: we asked, and we are
+      // not going to wait any longer.
     }
   }
 
-  /// Debug-only: hands a generated config to libXray's `testXray`, which
-  /// constructs an instance without starting it.
+  /// This app's own UID as the decimal string the `process` routing rule
+  /// matches, or null when the platform cannot say.
   ///
-  /// This is how the config generator is checked against the real parser
-  /// without a device ever establishing a TUN. Returns null when the engine
-  /// accepted the config, or the engine's own error string when it did not.
-  @visibleForTesting
-  Future<String?> validateConfig(String configJson) async {
+  /// A null answer does not stop a connect. The exemption is one of three
+  /// independent defences against the deadlock — the other two being the
+  /// pre-flight walk, which keeps a broken chain from ever taking the
+  /// route, and the unconditional local teardown — so losing it degrades
+  /// the app rather than breaking it.
+  Future<String?> _appProcessName() async {
+    if (_processNameResolved) return _processName;
+    _processNameResolved = true;
     try {
-      return await _methods.invokeMethod<String>('validateConfig', <String, Object?>{
-        'config': configJson,
-      });
+      final uid = await _methods
+          .invokeMethod<int>('appUid')
+          .timeout(const Duration(seconds: 3));
+      if (uid != null && uid >= 0) _processName = '$uid';
+    } on Object {
+      // Desktop hosts and tests have no such method. No rule is emitted,
+      // which is better than one that cannot match.
+    }
+    if (_processName == null) {
+      debugPrint(
+        'AndroidVpnEngine: no UID available; this app\'s own traffic will '
+        'be carried by the chain.',
+      );
+    }
+    return _processName;
+  }
+
+  /// Hands a config to libXray's `testXray`, which builds an instance and
+  /// closes it without starting one.
+  ///
+  /// Returns null when the engine accepted it, or the engine's own error
+  /// string when it did not. A failure to *ask* (no platform, a timeout) is
+  /// reported as acceptance: a validation step that cannot run must not
+  /// become a second way to refuse a working chain.
+  Future<String?> _validateConfig(String configJson) async {
+    try {
+      return await _methods.invokeMethod<String>(
+        'validateConfig',
+        <String, Object?>{'config': configJson},
+      ).timeout(validateTimeout);
     } on PlatformException catch (error) {
       return error.message ?? error.code;
+    } on Object {
+      return null;
     }
   }
+
+  /// Exposed so an on-device check can put a config through the real parser
+  /// without a connect. The connect path uses [_validateConfig].
+  @visibleForTesting
+  Future<String?> validateConfig(String configJson) =>
+      _validateConfig(configJson);
 
   @override
   Future<void> dispose() async {
     _disposed = true;
+    _preflight?.cancel();
+    _preflight = null;
     await _statusSub?.cancel();
     await _statsSub?.cancel();
     _statusSub = null;

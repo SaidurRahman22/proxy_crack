@@ -222,6 +222,12 @@ class _ConnectProgress extends StatelessWidget {
       ConnectStage.fetchingCredentials =>
         'Fetching credentials '
             '(${controller.credentialsFetched} of $hops)',
+      // Named rather than folded into "Starting the tunnel", because
+      // nothing has been routed yet and a failure here costs the user
+      // nothing. That is the whole point of the stage existing.
+      ConnectStage.preflight => hops > 1
+          ? 'Checking the chain can carry traffic'
+          : 'Checking the hop answers',
       ConnectStage.startingEngine => 'Starting the tunnel',
       ConnectStage.idle => '',
     };
@@ -427,21 +433,33 @@ class _ControlColumn extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // The app can be working on a connect while the engine still reports the
+    // state it was left in — most visibly a previous error, during a retry.
+    // Both the banner and the control follow this rather than the engine
+    // alone, so neither invites the user to start something that is already
+    // running.
+    final isWorking = controller.connectStage != ConnectStage.idle;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
-        _StatusBanner(status: status),
-        if (controller.connectStage != ConnectStage.idle ||
-            controller.connectFailure != null) ...<Widget>[
+        _StatusBanner(status: status, isWorking: isWorking),
+        if (isWorking || controller.connectFailure != null) ...<Widget>[
           const SizedBox(height: AppSpacing.md),
           _ConnectProgress(controller: controller),
         ],
         const SizedBox(height: AppSpacing.lg),
+        // The control is live whenever there is anything to stop. Only a
+        // genuinely idle app with an empty chain has nothing for a tap to
+        // do; in every other state the tap is the off switch, and the off
+        // switch is never taken away.
         ConnectButton(
           status: status,
-          onPressed: chain.isEmpty && !status.hasError
-              ? null
-              : controller.toggleConnection,
+          isWorking: isWorking,
+          onPressed:
+              chain.isEmpty && status.state == EngineState.disconnected && !isWorking
+                  ? null
+                  : controller.toggleConnection,
         ),
         const SizedBox(height: AppSpacing.md),
         if (chain.isEmpty)
@@ -589,15 +607,23 @@ class _StatsGrid extends StatelessWidget {
 /// One line that says exactly what the tunnel is doing, plus determinate
 /// progress while connecting -- not a bare spinner.
 class _StatusBanner extends StatelessWidget {
-  const _StatusBanner({required this.status});
+  const _StatusBanner({required this.status, this.isWorking = false});
 
   final EngineStatus status;
+
+  /// See `ConnectButton.isWorking`. A stale error headline over a connect
+  /// that is already running is the same misreport, one widget up.
+  final bool isWorking;
 
   @override
   Widget build(BuildContext context) {
     final tokens = context.tokens;
 
-    final (Color color, IconData icon, String title) = switch (status.state) {
+    final state = isWorking && status.state != EngineState.disconnecting
+        ? EngineState.connecting
+        : status.state;
+
+    final (Color color, IconData icon, String title) = switch (state) {
       EngineState.disconnected => (
           tokens.mutedForeground,
           Icons.lock_open_outlined,
@@ -618,15 +644,29 @@ class _StatusBanner extends StatelessWidget {
           Icons.sync,
           'Disconnecting',
         ),
+      // A refusal that the pre-flight caught names its own cause. "Connection
+      // failed" would send the user looking at the hop, the credentials or
+      // their own network — none of which is the problem.
       EngineState.error => (
           tokens.destructiveText,
-          Icons.error_outline,
-          'Connection failed',
+          status.failure == EngineFailure.providerBlocked
+              ? Icons.block
+              : Icons.error_outline,
+          switch (status.failure) {
+            EngineFailure.providerBlocked => 'The provider refused this chain',
+            EngineFailure.configRejected => 'This route could not be built',
+            _ => 'Connection failed',
+          },
         ),
     };
 
-    final detail = status.detail ??
-        switch (status.state) {
+    // When the app is working but the engine has not caught up, the
+    // engine's `detail` still describes the *previous* attempt. The
+    // progress card underneath says what is actually happening, so leaving
+    // the stale sentence here would contradict it.
+    final stale = state != status.state;
+    final detail = (stale ? null : status.detail) ??
+        switch (state) {
           EngineState.disconnected =>
             'Traffic is leaving this device unproxied.',
           EngineState.connected => 'All device traffic is going through '
@@ -636,7 +676,7 @@ class _StatusBanner extends StatelessWidget {
 
     return MotionSwitcher(
       child: Container(
-        key: ValueKey<String>('${status.state}-${status.detail}'),
+        key: ValueKey<String>('$state-$detail'),
         padding: const EdgeInsets.all(AppSpacing.md),
         decoration: BoxDecoration(
           color: color.withValues(alpha: 0.10),
@@ -659,7 +699,7 @@ class _StatusBanner extends StatelessWidget {
                 Semantics(
                   liveRegion: true,
                   child: Text(
-                    status.state.name.toUpperCase(),
+                    state.name.toUpperCase(),
                     style: context.text.labelSmall?.copyWith(color: color),
                   ),
                 ),
@@ -669,7 +709,7 @@ class _StatusBanner extends StatelessWidget {
               const SizedBox(height: AppSpacing.sm - 2),
               Text(detail, style: context.text.bodySmall),
             ],
-            if (status.state == EngineState.connecting) ...<Widget>[
+            if (state == EngineState.connecting) ...<Widget>[
               const SizedBox(height: AppSpacing.sm + AppSpacing.xs),
               ClipRRect(
                 borderRadius: BorderRadius.circular(AppRadius.pill),

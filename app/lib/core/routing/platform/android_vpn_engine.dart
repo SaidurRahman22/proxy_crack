@@ -1,10 +1,13 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+import '../../../data/models/chain_hop.dart';
 import '../../../data/models/proxy_chain.dart';
 import '../../../data/models/proxy_credentials.dart';
+import '../../net/host_pin.dart';
 import '../chain_preflight.dart';
 import '../proxy_engine.dart';
 import '../xray_config_builder.dart';
@@ -28,6 +31,10 @@ class AndroidVpnEngine implements ProxyEngine {
     EventChannel? statusChannel,
     EventChannel? statsChannel,
     ChainPreflight Function()? preflightFactory,
+    HostPin? hostPin,
+    String? apiBaseUrl,
+    HostResolver? hostResolver,
+    this.resolveTimeout = defaultResolveTimeout,
     this.connectTimeout = defaultConnectTimeout,
     this.disconnectTimeout = defaultDisconnectTimeout,
     this.stopCallTimeout = defaultStopCallTimeout,
@@ -35,7 +42,16 @@ class AndroidVpnEngine implements ProxyEngine {
   })  : _methods = methodChannel ?? const MethodChannel(methodChannelName),
         _statusEvents = statusChannel ?? const EventChannel(statusChannelName),
         _statsEvents = statsChannel ?? const EventChannel(statsChannelName),
-        _preflightFactory = preflightFactory ?? ChainPreflight.new {
+        _preflightFactory = preflightFactory ?? ChainPreflight.new,
+        // An unshared, never-read pin when none was supplied: the pinning
+        // path then runs identically and simply has no audience, which is
+        // one branch fewer than making the field nullable.
+        _hostPin = hostPin ?? HostPin(),
+        _hostResolver = hostResolver ?? InternetAddress.lookup,
+        // Null when the base URL is already an address — today's
+        // `http://10.0.2.2:8000` — which is the no-op path: there is no name
+        // to look up, so nothing is resolved and nothing is pinned.
+        _apiHost = apiBaseUrl == null ? null : hostToPin(apiBaseUrl) {
     _attach();
   }
 
@@ -68,15 +84,37 @@ class AndroidVpnEngine implements ProxyEngine {
   /// Ceiling on `testXray`, which parses a config and builds an instance.
   static const Duration defaultValidateTimeout = Duration(seconds: 10);
 
+  /// Ceiling on the pre-resolution of the API host (P26).
+  ///
+  /// It runs on the ordinary network with no tunnel in the way, so a healthy
+  /// device answers in milliseconds. The bound exists for the device that is
+  /// not healthy — a captive portal, or a previous session's TUN still held
+  /// — where the useful outcome is a quick refusal, not a long wait.
+  static const Duration defaultResolveTimeout = Duration(seconds: 8);
+
   /// Injectable so a test can prove the *structure* — that every wait is
   /// bounded — in milliseconds instead of in wall-clock seconds.
   final Duration connectTimeout;
   final Duration disconnectTimeout;
   final Duration stopCallTimeout;
   final Duration validateTimeout;
+  final Duration resolveTimeout;
 
   final XrayConfigBuilder _configBuilder;
   final ChainPreflight Function() _preflightFactory;
+
+  /// Where the session's pinned API address is published for the transport
+  /// to read.
+  final HostPin _hostPin;
+
+  /// The API hostname to pre-resolve, or null when the base URL is already
+  /// an address and there is nothing to resolve.
+  final String? _apiHost;
+
+  /// Injectable resolver, so the P26 path can be tested without a
+  /// nameserver.
+  final HostResolver _hostResolver;
+
   final MethodChannel _methods;
   final EventChannel _statusEvents;
   final EventChannel _statsEvents;
@@ -239,6 +277,17 @@ class AndroidVpnEngine implements ProxyEngine {
     _status = next;
     if (!_statusController.isClosed) _statusController.add(next);
 
+    // The pin lasts exactly as long as the session does, and `disconnected`
+    // is the only state that ends one.
+    //
+    // Note what is *not* here: `error`. The service publishes an error while
+    // still holding the interface closed when the engine dies under it, and
+    // that is the state in which the app most needs its pinned address —
+    // dropping the pin there would send the next API call's name lookup
+    // into the chain that just died, which is the deadlock this whole
+    // mechanism exists to remove.
+    if (next.state == EngineState.disconnected) _hostPin.clear();
+
     final connecting = _connectSettling;
     if (connecting != null && !connecting.isCompleted) {
       switch (next.state) {
@@ -295,18 +344,26 @@ class AndroidVpnEngine implements ProxyEngine {
   ///
   /// 1. build the config,
   /// 2. hand it to the engine's own parser (`testXray`, no TUN),
-  /// 3. walk the chain hop by hop over the physical network,
-  /// 4. only then ask for VPN consent,
-  /// 5. only then establish the TUN and move the default route.
+  /// 3. resolve every name the session will need, and pin the API's,
+  /// 4. walk the chain hop by hop over the physical network,
+  /// 5. only then ask for VPN consent,
+  /// 6. only then establish the TUN and move the default route.
   ///
-  /// Steps 2 and 3 exist because of a real incident: the TUN was
+  /// Steps 2 and 4 exist because of a real incident: the TUN was
   /// established and the default route moved *first*, and the engine then
   /// discovered it could not reach hop 2. The chain carried nothing, fail
   /// closed correctly held the interface up, and the device lost all
   /// connectivity with the app — the only thing that can turn the tunnel
   /// off — unable to reach its own backend.
   ///
-  /// Fail closed is unchanged **after** step 5. This moves *when* the
+  /// Step 3 closes the hole those two left (P26). The `process` rule keeps
+  /// our *sockets* out of the chain but cannot keep our *name lookups* out
+  /// of it, because `netd` resolves as root in another process and the rule
+  /// matches our UID. Resolving before the TUN exists removes the
+  /// dependency rather than trying to route around it. See
+  /// `core/net/host_pin.dart` for why exempting netd's UID was rejected.
+  ///
+  /// Fail closed is unchanged **after** step 6. This moves *when* the
   /// tunnel is committed, not whether a live tunnel is allowed to leak.
   @override
   Future<void> connect(ProxyChain chain, {ChainCredentials? credentials}) async {
@@ -356,12 +413,35 @@ class AndroidVpnEngine implements ProxyEngine {
       throw EngineException(EngineFailure.configRejected, detail);
     }
 
-    // --- step 3: walk the chain on the physical network ----------------
+    // --- step 3: resolve names while ordinary DNS still works -----------
     _publish(
       EngineStatus(
         state: EngineState.connecting,
         chain: chain,
-        progress: 0.2,
+        progress: 0.15,
+        detail: 'Resolving addresses before the tunnel starts',
+      ),
+    );
+
+    final InternetAddress? firstHopAddress;
+    try {
+      firstHopAddress = await _preResolve(chain);
+    } on HostResolutionException catch (error) {
+      // Refuse, rather than establish a tunnel the app may not be able to
+      // reach its own backend through. A connect that does not happen is
+      // recoverable; a device that cannot ask for the tunnel to stop is
+      // not.
+      _failNow(EngineFailure.networkUnavailable, error.message, chain: chain);
+      throw EngineException(EngineFailure.networkUnavailable, error.message);
+    }
+    if (_isStale(generation)) return;
+
+    // --- step 4: walk the chain on the physical network ----------------
+    _publish(
+      EngineStatus(
+        state: EngineState.connecting,
+        chain: chain,
+        progress: 0.25,
         detail: chain.length > 1
             ? 'Checking hop 2 is reachable through hop 1'
             : 'Checking hop 1 answers',
@@ -372,7 +452,11 @@ class AndroidVpnEngine implements ProxyEngine {
     _preflight = preflight;
     final PreflightResult probe;
     try {
-      probe = await preflight.run(chain, credentials: credentials);
+      probe = await preflight.run(
+        chain,
+        credentials: credentials,
+        firstHopAddress: firstHopAddress,
+      );
     } finally {
       if (identical(_preflight, preflight)) _preflight = null;
     }
@@ -383,7 +467,7 @@ class AndroidVpnEngine implements ProxyEngine {
       throw EngineException(failure, probe.detail);
     }
 
-    // --- step 4: consent ------------------------------------------------
+    // --- step 5: consent ------------------------------------------------
     _publish(
       EngineStatus(
         state: EngineState.connecting,
@@ -416,7 +500,7 @@ class AndroidVpnEngine implements ProxyEngine {
       throw EngineException(EngineFailure.permissionDenied, detail);
     }
 
-    // --- step 5: commit -------------------------------------------------
+    // --- step 6: commit -------------------------------------------------
     final settling = Completer<void>();
     _connectSettling = settling;
 
@@ -442,6 +526,63 @@ class AndroidVpnEngine implements ProxyEngine {
       throw const EngineException(EngineFailure.hopUnreachable, detail);
     } finally {
       if (identical(_connectSettling, settling)) _connectSettling = null;
+    }
+  }
+
+  /// P26: resolve, before the TUN exists, every name the session will need.
+  ///
+  /// Two names, treated differently on purpose.
+  ///
+  /// **The API host.** Pinned for the session, and a failure to resolve it
+  /// refuses the connect. The app must be able to reach its own backend
+  /// while the tunnel is up — to re-fetch credentials, to report usage, to
+  /// sign out — and once the TUN is established there is no second chance
+  /// to look the name up, because our own lookups are carried by the chain
+  /// whatever the `process` rule says. If the base URL is already an
+  /// address, `_apiHost` is null and this does nothing at all: no lookup,
+  /// no pin, no behaviour change. That is today's dev case
+  /// (`http://10.0.2.2:8000`).
+  ///
+  /// **Hop 1.** Resolved so the pre-flight walk can dial it without a
+  /// lookup, but *best effort*: a failure here returns null and the walk
+  /// dials by name exactly as it always did. A name that cannot be resolved
+  /// is a hop that cannot be reached, and the walk already reports that
+  /// precisely ("Hop 1 did not answer"). Turning it into a second, earlier
+  /// refusal would only make the same failure arrive with a worse message.
+  ///
+  /// Hops 2..n are deliberately left as names: they are resolved by the
+  /// previous hop, never by this device.
+  Future<InternetAddress?> _preResolve(ProxyChain chain) async {
+    final apiHost = _apiHost;
+    if (apiHost != null) {
+      final address = await resolveHostOnce(
+        apiHost,
+        resolver: _hostResolver,
+        timeout: resolveTimeout,
+      );
+      _hostPin.pin(apiHost, address);
+      if (kDebugMode) {
+        // The address of our own backend is not a secret and not a user
+        // identifier; knowing which one was pinned is the first thing
+        // anyone debugging this will want.
+        debugPrint('P26: pinned API host $apiHost for this session.');
+      }
+    }
+
+    if (chain.isEmpty) return null;
+    final hops = List<ChainHop>.of(chain.hops)
+      ..sort((a, b) => a.position.compareTo(b.position));
+    final host = hops.first.proxy.host;
+    final literal = InternetAddress.tryParse(host);
+    if (literal != null) return literal;
+    try {
+      return await resolveHostOnce(
+        host,
+        resolver: _hostResolver,
+        timeout: resolveTimeout,
+      );
+    } on HostResolutionException {
+      return null;
     }
   }
 
@@ -595,6 +736,7 @@ class AndroidVpnEngine implements ProxyEngine {
     _disposed = true;
     _preflight?.cancel();
     _preflight = null;
+    _hostPin.clear();
     await _statusSub?.cancel();
     await _statsSub?.cancel();
     _statusSub = null;

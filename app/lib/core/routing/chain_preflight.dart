@@ -141,12 +141,36 @@ class ChainPreflight {
     _socket = null;
   }
 
+  /// Walks [chain], dialling hop 1 at [firstHopAddress] when one is given.
+  ///
+  /// ## Why hop 1 gets an address and the rest do not
+  ///
+  /// P26 again, from the other side. This walk runs before the TUN exists,
+  /// so in the ordinary case its own name lookups are carried by the
+  /// physical network and nothing is wrong. The case that is not ordinary is
+  /// a *later* connect attempt: the service publishes an error while still
+  /// holding the interface closed when the engine dies under it (fail
+  /// closed), and in that state nothing here is connected but the TUN is
+  /// still up. A hostname hop would then be looked up by `netd`, as root,
+  /// into a chain that carries nothing — and the pre-flight that exists to
+  /// stop a bad chain being committed would itself hang on one.
+  ///
+  /// So the caller pre-resolves hop 1 in the same bounded step that pins the
+  /// API host, and passes the address here. `Socket.connect` with an
+  /// [InternetAddress] performs no lookup at all.
+  ///
+  /// Hops 2..n need nothing: they are named to the *previous hop* — in the
+  /// `CONNECT` request line, or as a SOCKS5 `ATYP 0x03` domain — and
+  /// resolved by that proxy server, never by this device. Addressing them by
+  /// name is also deliberate (the engine does the same), so the walk tests
+  /// what the engine will actually do.
   Future<PreflightResult> run(
     ProxyChain chain, {
     ChainCredentials? credentials,
+    InternetAddress? firstHopAddress,
   }) async {
     try {
-      return await _run(chain, credentials)
+      return await _run(chain, credentials, firstHopAddress)
           .timeout(totalTimeout, onTimeout: _timedOut);
     } finally {
       cancel();
@@ -164,6 +188,7 @@ class ChainPreflight {
   Future<PreflightResult> _run(
     ProxyChain chain,
     ChainCredentials? credentials,
+    InternetAddress? firstHopAddress,
   ) async {
     final hops = List<ChainHop>.of(chain.hops)
       ..sort((a, b) => a.position.compareTo(b.position));
@@ -179,7 +204,9 @@ class ChainPreflight {
     final Socket socket;
     try {
       socket = await Socket.connect(
-        first.host,
+        // An InternetAddress here means no lookup; a String means the
+        // ordinary one. Both dial the same hop.
+        firstHopAddress ?? first.host,
         first.port,
         timeout: connectTimeout,
       );

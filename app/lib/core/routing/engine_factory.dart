@@ -1,5 +1,6 @@
 import 'dart:io' show Platform;
 
+import '../net/host_pin.dart';
 import 'mock_proxy_engine.dart';
 import 'platform/android_vpn_engine.dart';
 import 'proxy_engine.dart';
@@ -19,7 +20,17 @@ import 'proxy_engine.dart';
 ///   simulates is better than a real engine that silently routes nothing,
 ///   and `supportsSystemWideRouting` lets the UI degrade honestly once the
 ///   desktop engines arrive.
-ProxyEngine createDefaultEngine() {
-  if (Platform.isAndroid) return AndroidVpnEngine();
+///
+/// [hostPin] and [apiBaseUrl] are P26's mitigation. The Android engine
+/// resolves the API host before it establishes the TUN and publishes the
+/// address on [hostPin], which the HTTP transport then dials for the rest of
+/// the session. Both are optional: a build that passes neither resolves
+/// names the ordinary way, which is correct everywhere there is no tunnel.
+ProxyEngine createDefaultEngine({HostPin? hostPin, String? apiBaseUrl}) {
+  if (Platform.isAndroid) {
+    return AndroidVpnEngine(hostPin: hostPin, apiBaseUrl: apiBaseUrl);
+  }
+  // The mock engine establishes nothing, so there is no window in which the
+  // device's resolver stops working and nothing to pin against.
   return MockProxyEngine();
 }

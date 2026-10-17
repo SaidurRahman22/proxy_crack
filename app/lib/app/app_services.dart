@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 
+import '../core/net/host_pin.dart';
 import '../core/routing/engine_factory.dart';
 import '../core/routing/proxy_engine.dart';
 import '../data/api/api_client.dart';
@@ -73,9 +74,17 @@ class AppServices {
 
     late final SessionController session;
 
+    // P26. One pin, written by the engine before it establishes the TUN and
+    // read by the transport for the life of the session. It is shared state
+    // on purpose and it is the only shared state between those two: the
+    // engine must not know what an HTTP client is, and the transport must
+    // not know what a tunnel is.
+    final hostPin = HostPin();
+
     final base = HttpTransport(
       config: resolvedConfig,
       readAccessToken: () => store.accessToken,
+      hostPin: hostPin,
     );
     final transport = AuthRefreshTransport(
       base,
@@ -119,7 +128,11 @@ class AppServices {
       // It lives here rather than in `proxy_crack_app.dart` because
       // `main()` builds `AppServices` itself and passes it in, so the
       // default inside this factory is what a real run actually gets.
-      engine: engine ?? createDefaultEngine(),
+      engine: engine ??
+          createDefaultEngine(
+            hostPin: hostPin,
+            apiBaseUrl: resolvedConfig.baseUrl,
+          ),
       usesMockApi: mock,
     );
   }

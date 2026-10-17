@@ -486,7 +486,46 @@ identical, so "could not check" must never become "refused".
 direct via the `process` rule. The rule value is the **UID as a decimal string** (`"10217"`),
 matched by exact string compare in `ProcessNameMatcher` — not a package name.
 
-### ⚠️ P26 (new): our own DNS may still go through the chain
+### ✅ P26 RESOLVED 2026-10-17 — confirmed real, then closed by pre-resolving and pinning
+
+**Confirmed, not assumed:** `netd` runs as **root (UID 0)** in a separate process, and on API 29+
+(device is API 36) app DNS goes through it — so DNS packets carry **netd's UID, not ours**, and
+the `process` rule cannot match them.
+
+**The obvious fix was rejected:** exempting netd's UID would take *every app's* DNS off the
+tunnel — a device-wide DNS leak, precisely what the product exists to prevent.
+
+**What shipped:** `HostPin` — the API host is resolved during pre-flight, while the device still
+has normal connectivity, and the address is pinned for the tunnel session. No DNS dependency at
+all. The pin is cleared on `disconnected`, deliberately **not** on `error`, because the service
+publishes an error while still holding the interface — exactly when the app needs the address.
+
+**TLS: the URL is never rewritten.** Rewriting the host would break certificate validation, pick
+the wrong vhost via SNI, and make Django answer 400 `DisallowedHost` — all production-only.
+`HttpClient.connectionFactory` changes only the TCP destination; SNI, validation and the `Host`
+header still carry the hostname.
+
+> ⚠️ **A trap found by reading the Dart SDK rather than the docs:** when `connectionFactory` is
+> set, `dart:io` uses the returned socket **as-is** — its own `SecureSocket.startConnect` sits in
+> the `else` branch and is skipped. A factory returning a plain socket for an `https` URL would
+> **speak cleartext at a TLS port.** The factory therefore secures the socket itself. The test
+> reads the raw **TLS ClientHello** and asserts the `server_name` extension carries the hostname,
+> that the IP does not appear, and that the first byte is `0x16` — a TLS record, not a cleartext
+> `GET`.
+
+**Decisive on-device proof:** with a single-hop tunnel up, device DNS was broken completely
+(private DNS pointed at a blackhole; `ping` by name failed). A refresh still reached Django.
+**Control:** disconnected so the pin cleared, same broken DNS → nothing reached Django. So the
+pin carries the session, and only while the session lasts.
+
+**Still unverified:** a real production TLS round trip *through the pin* — HTTPS through the new
+client was proven, and SNI/Host survival was unit-tested, but never both at once. **Do one
+staging connect against a real HTTPS API host before trusting this in production.**
+
+<details>
+<summary>Original P26 writeup</summary>
+
+### our own DNS may still go through the chain
 
 The process rule exempts our traffic *if those packets carry our UID*. On Android the system
 resolver performs lookups on the app's behalf, and it is unconfirmed whether
@@ -496,6 +535,8 @@ resolver performs lookups on the app's behalf, and it is unconfirmed whether
 **hostname-based production API URL**, a broken chain could block name resolution and recreate a
 weaker form of the deadlock. **Test against a hostname API before production.** Pre-flight and
 local teardown cover it meanwhile.
+
+</details>
 
 ### Positions taken
 

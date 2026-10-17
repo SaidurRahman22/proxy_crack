@@ -80,6 +80,104 @@ flutter run --dart-define=PROXY_CRACK_API_BASE_URL=http://localhost:8000
 
 ---
 
+## P26 — the API host is resolved before the tunnel, and pinned
+
+### The defect
+
+The `process` routing rule in
+[`lib/core/routing/xray_config_builder.dart`](lib/core/routing/xray_config_builder.dart)
+keeps this app's **own sockets** out of the chain by matching our UID, so a
+broken chain cannot cut the app off from its own backend. It cannot do the
+same for our **name lookups**.
+
+On API 29+ an app's `getaddrinfo` does not leave the app. It is handed to
+**`netd`, which runs as root (UID 0) in a separate process**. The DNS packets
+that reach the tunnel therefore carry *netd's* UID, not ours, and a rule
+written against our UID can never match them.
+
+In production, where the base URL is a hostname rather than today's bare
+`10.0.2.2`, that reopens the deadlock the pre-flight walk and the
+unconditional off switch were built to close:
+
+1. the chain breaks;
+2. the app tries to reach the API to re-resolve or re-fetch credentials;
+3. the lookup for the API hostname goes into the broken chain and never
+   answers;
+4. the app cannot recover.
+
+Dev never shows it, because a bare IP is never looked up.
+
+### ⛔ Why netd's UID is **not** exempted
+
+Adding netd's UID to the `process` rule is the obvious-looking fix and it is
+the wrong one. `netd` resolves for **every app on the device**, so exempting
+it takes the whole device's DNS off the tunnel — every hostname every app
+visits goes to the user's ISP in clear. That is a device-wide DNS leak, and
+preventing exactly that is what this product is for. The rule stays keyed to
+our own UID.
+
+### The mitigation
+
+Resolve the API host **before `VpnService.establish()`**, in the same
+pre-flight phase that walks the chain, while the device still has ordinary
+connectivity — and dial that address for the rest of the session. There is
+then no name to look up while the tunnel is up, so whose UID a lookup would
+have carried stops mattering.
+
+| | |
+|---|---|
+| Where | [`lib/core/net/host_pin.dart`](lib/core/net/host_pin.dart), used by `AndroidVpnEngine` step 3 and by [`lib/data/api/pinned_http_client.dart`](lib/data/api/pinned_http_client.dart) |
+| When | Once per connect, before the TUN. Never re-resolved mid-session — that would reintroduce the dependency at the worst moment. |
+| Scope | One host: ours. It is not a DNS cache and must not become one. |
+| Base URL already an IP | **No-op.** Nothing is looked up and nothing is pinned. |
+| Cannot resolve | **The connect is refused**, before the TUN. A connect that does not happen is recoverable; a device that cannot ask for the tunnel to stop is not. |
+| Several A records | IPv4 first, then the numerically lowest address — so the pin is the same on every connect from the same answer. |
+| IPv6 | Taken **only** when there is no IPv4 at all (an IPv6-only carrier with DNS64 returns nothing else). Never silently preferred. |
+| Released | When the engine reports `disconnected` — **not** on `error`, because the service publishes an error while still holding the interface closed, and that is when the pin matters most. |
+
+The pre-flight walk gets the same treatment for **hop 1** only: it is dialled
+by address so a hostname hop cannot be looked up into a chain that a previous
+session left up. Hops 2..n stay as names on purpose — they are resolved by
+the *previous hop*, never by this device.
+
+### ⚠️ TLS: the request URL is never rewritten
+
+Swapping the hostname out of the URL for the address is the naive version and
+it breaks TLS, in production only:
+
+* the certificate is issued for the name, so validating it against an address
+  fails unless the certificate carries an IP SAN, which public CAs rarely
+  issue;
+* **SNI** would carry the address, so any host serving several names from one
+  address answers with the wrong certificate;
+* the **`Host` header** would carry the address, which Django rejects with a
+  400 `DisallowedHost` before a view runs.
+
+So the URL is left exactly as it is, and only the TCP destination changes,
+through `HttpClient.connectionFactory`:
+
+| carries | value |
+|---|---|
+| TCP destination | the pinned address |
+| TLS SNI | the hostname |
+| certificate validation | the hostname |
+| `Host` header | the hostname |
+
+One trap is worth repeating from
+[`pinned_http_client.dart`](lib/data/api/pinned_http_client.dart): when
+`connectionFactory` is set, **dart:io uses the returned socket as-is** and
+does not secure it. A factory that hands back a plain socket for an `https`
+URL speaks cleartext at a TLS port. The factory calls
+`SecureSocket.secure(..., host: url.host)` itself, with no `onBadCertificate`
+and no custom `SecurityContext`, so validation is exactly as strict as it was
+before the pin existed.
+
+`test/host_pin_test.dart` pins this by reading the TLS ClientHello off a plain
+socket and asserting the `server_name` extension carries the hostname and not
+the address.
+
+---
+
 ## Running without a backend
 
 ```bash

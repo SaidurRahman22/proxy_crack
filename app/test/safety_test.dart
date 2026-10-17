@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:proxy_crack/app/app_controller.dart';
+import 'package:proxy_crack/core/net/host_pin.dart';
 import 'package:proxy_crack/core/theme/app_theme.dart';
 import 'package:proxy_crack/features/connection/widgets/connect_button.dart';
 import 'package:proxy_crack/core/routing/chain_preflight.dart';
@@ -428,6 +429,276 @@ void main() {
   });
 
   // ---------------------------------------------------------------------
+  // 2b. P26 — our own DNS is not carried by the chain either
+  // ---------------------------------------------------------------------
+
+  group('the API host is pinned before the TUN exists', () {
+    // The `process` rule keeps our *sockets* off the chain by matching our
+    // UID. It cannot keep our *name lookups* off it: on API 29+ an app's
+    // DNS goes through `netd`, which runs as root (UID 0) in another
+    // process, so those packets carry netd's UID and our rule can never
+    // match them. Exempting netd would take every app's DNS off the tunnel
+    // — a device-wide DNS leak — so the fix is to need no DNS at all while
+    // the tunnel is up.
+
+    Future<void> settle() =>
+        Future<void>.delayed(const Duration(milliseconds: 60));
+
+    _ChannelHarness goodHarness() => _ChannelHarness()
+      ..handler = (call) {
+        if (call.method == 'appUid') return 10234;
+        if (call.method == 'validateConfig') return null;
+        if (call.method == 'prepare') return true;
+        if (call.method == 'start') return true;
+        return null;
+      };
+
+    test('resolution happens before consent and before start', () async {
+      final harness = goodHarness();
+      addTearDown(harness.dispose);
+
+      final pin = HostPin();
+      final engine = harness.engine(
+        preflight: () => _FakePreflight(_ok),
+        hostPin: pin,
+        apiBaseUrl: 'https://api.example.com',
+        // Recorded into the same list as the platform calls, so the
+        // ordering assertion below is about one timeline, not two.
+        hostResolver: (host) async {
+          harness.calls.add('resolve:$host');
+          return <InternetAddress>[InternetAddress('203.0.113.7')];
+        },
+      );
+      addTearDown(engine.dispose);
+
+      final connecting = engine.connect(
+        chainOf(<Proxy>[proxy(id: 1, host: '10.0.0.1', port: 8080)]),
+      );
+      await settle();
+      harness.emitStatus(<String, Object?>{'state': 'connected'});
+      await connecting.timeout(const Duration(seconds: 2));
+
+      final resolved = harness.calls.indexOf('resolve:api.example.com');
+      expect(resolved, isNonNegative, reason: 'the API host was never resolved');
+      // `start` is what hands the config to the service that calls
+      // `establish()`. Everything about this fix depends on the lookup
+      // being finished by then.
+      expect(resolved, lessThan(harness.calls.indexOf('start')));
+      expect(resolved, lessThan(harness.calls.indexOf('prepare')));
+
+      expect(pin.addressFor('api.example.com')!.address, '203.0.113.7');
+    });
+
+    test('an IP base URL is a no-op: nothing is looked up, nothing is pinned',
+        () async {
+      // Today's dev case. A lookup here would be a pointless round trip
+      // that can only fail.
+      final harness = goodHarness();
+      addTearDown(harness.dispose);
+
+      final pin = HostPin();
+      final engine = harness.engine(
+        preflight: () => _FakePreflight(_ok),
+        hostPin: pin,
+        apiBaseUrl: 'http://10.0.2.2:8000',
+        hostResolver: (host) async {
+          harness.calls.add('resolve:$host');
+          return <InternetAddress>[InternetAddress('203.0.113.7')];
+        },
+      );
+      addTearDown(engine.dispose);
+
+      final connecting = engine.connect(
+        chainOf(<Proxy>[proxy(id: 1, host: '10.0.0.1', port: 8080)]),
+      );
+      await settle();
+      harness.emitStatus(<String, Object?>{'state': 'connected'});
+      await connecting.timeout(const Duration(seconds: 2));
+
+      expect(harness.calls.any((c) => c.startsWith('resolve:')), isFalse);
+      expect(pin.isPinned, isFalse);
+      // And the connect is otherwise completely unaffected.
+      expect(harness.calls, contains('start'));
+      expect(engine.status.state, EngineState.connected);
+    });
+
+    test('a resolution failure refuses to connect instead of establishing',
+        () async {
+      // The whole point of doing this before the TUN. A connect that does
+      // not happen is recoverable; a device that cannot reach the backend
+      // it needs in order to ask for the tunnel to stop is not.
+      final harness = goodHarness();
+      addTearDown(harness.dispose);
+
+      final pin = HostPin();
+      final engine = harness.engine(
+        preflight: () => _FakePreflight(_ok),
+        hostPin: pin,
+        apiBaseUrl: 'https://api.example.com',
+        hostResolver: (host) =>
+            Future<List<InternetAddress>>.error(const SocketException('no dns')),
+      );
+      addTearDown(engine.dispose);
+
+      await expectLater(
+        engine.connect(chainOf(<Proxy>[proxy(id: 1, host: '10.0.0.1', port: 8080)])),
+        throwsA(
+          isA<EngineException>().having(
+            (e) => e.failure,
+            'failure',
+            EngineFailure.networkUnavailable,
+          ),
+        ),
+      );
+
+      expect(harness.calls, isNot(contains('prepare')));
+      expect(
+        harness.calls,
+        isNot(contains('start')),
+        reason: 'a TUN was established for a session whose API host could '
+            'not be resolved',
+      );
+      expect(pin.isPinned, isFalse);
+      expect(engine.status.state, EngineState.error);
+      expect(engine.status.detail, contains('api.example.com'));
+    });
+
+    test('hop 1 is handed to the walk as an address, so it needs no lookup',
+        () async {
+      // Pre-flight runs before the TUN in the ordinary case, but not on a
+      // *later* attempt: the service publishes an error while still holding
+      // the interface closed, and in that state a hostname hop would be
+      // resolved by netd into a chain that carries nothing.
+      final harness = goodHarness();
+      addTearDown(harness.dispose);
+
+      final fake = _FakePreflight(_ok);
+      final engine = harness.engine(
+        preflight: () => fake,
+        hostPin: HostPin(),
+        apiBaseUrl: 'http://10.0.2.2:8000',
+        hostResolver: (host) async {
+          harness.calls.add('resolve:$host');
+          return <InternetAddress>[InternetAddress('198.51.100.4')];
+        },
+      );
+      addTearDown(engine.dispose);
+
+      final connecting = engine.connect(
+        chainOf(<Proxy>[proxy(id: 1, host: 'hop1.example.net', port: 8080)]),
+      );
+      await settle();
+      harness.emitStatus(<String, Object?>{'state': 'connected'});
+      await connecting.timeout(const Duration(seconds: 2));
+
+      expect(harness.calls, contains('resolve:hop1.example.net'));
+      expect(fake.sawFirstHopAddress?.address, '198.51.100.4');
+    });
+
+    test('a hop that is already an address is not looked up', () async {
+      final harness = goodHarness();
+      addTearDown(harness.dispose);
+
+      final fake = _FakePreflight(_ok);
+      final engine = harness.engine(
+        preflight: () => fake,
+        hostPin: HostPin(),
+        apiBaseUrl: 'http://10.0.2.2:8000',
+        hostResolver: (host) async {
+          harness.calls.add('resolve:$host');
+          return <InternetAddress>[InternetAddress('198.51.100.4')];
+        },
+      );
+      addTearDown(engine.dispose);
+
+      final connecting = engine.connect(
+        chainOf(<Proxy>[proxy(id: 1, host: '10.0.0.1', port: 8080)]),
+      );
+      await settle();
+      harness.emitStatus(<String, Object?>{'state': 'connected'});
+      await connecting.timeout(const Duration(seconds: 2));
+
+      expect(harness.calls.any((c) => c.startsWith('resolve:')), isFalse);
+      expect(fake.sawFirstHopAddress?.address, '10.0.0.1');
+    });
+
+    test('a hop that will not resolve does not become a second refusal',
+        () async {
+      // The walk already reports an unreachable hop 1 precisely. Refusing
+      // earlier would only deliver the same failure with a worse message.
+      final harness = goodHarness();
+      addTearDown(harness.dispose);
+
+      final fake = _FakePreflight(_ok);
+      final engine = harness.engine(
+        preflight: () => fake,
+        hostPin: HostPin(),
+        apiBaseUrl: 'http://10.0.2.2:8000',
+        hostResolver: (host) =>
+            Future<List<InternetAddress>>.error(const SocketException('no dns')),
+      );
+      addTearDown(engine.dispose);
+
+      final connecting = engine.connect(
+        chainOf(<Proxy>[proxy(id: 1, host: 'hop1.example.net', port: 8080)]),
+      );
+      await settle();
+      harness.emitStatus(<String, Object?>{'state': 'connected'});
+      await connecting.timeout(const Duration(seconds: 2));
+
+      expect(fake.ran, isTrue);
+      expect(
+        fake.sawFirstHopAddress,
+        isNull,
+        reason: 'the walk should fall back to dialling hop 1 by name',
+      );
+    });
+
+    test('the pin survives an error that holds the interface closed, and is '
+        'dropped only when the tunnel is really down', () async {
+      // The service publishes an error *while still holding the TUN* when
+      // the engine dies under it. That is the exact state in which the app
+      // needs its pinned address — dropping it there would send the next
+      // API lookup into the chain that just died.
+      final harness = goodHarness();
+      addTearDown(harness.dispose);
+
+      final pin = HostPin();
+      final engine = harness.engine(
+        preflight: () => _FakePreflight(_ok),
+        hostPin: pin,
+        apiBaseUrl: 'https://api.example.com',
+        hostResolver: (host) async =>
+            <InternetAddress>[InternetAddress('203.0.113.7')],
+      );
+      addTearDown(engine.dispose);
+
+      final connecting = engine.connect(
+        chainOf(<Proxy>[proxy(id: 1, host: '10.0.0.1', port: 8080)]),
+      );
+      await settle();
+      harness.emitStatus(<String, Object?>{'state': 'connected'});
+      await connecting.timeout(const Duration(seconds: 2));
+      expect(pin.isPinned, isTrue);
+
+      harness.emitStatus(<String, Object?>{
+        'state': 'error',
+        'failure': 'hopUnreachable',
+        'detail': 'The chain stopped carrying traffic.',
+      });
+      await settle();
+      expect(
+        pin.addressFor('api.example.com')!.address,
+        '203.0.113.7',
+        reason: 'the pin was dropped while the interface was still held',
+      );
+
+      await engine.disconnect().timeout(const Duration(seconds: 2));
+      expect(pin.isPinned, isFalse);
+    });
+  });
+
+  // ---------------------------------------------------------------------
   // The prober itself, against real sockets
   // ---------------------------------------------------------------------
 
@@ -673,12 +944,20 @@ class _FakePreflight extends ChainPreflight {
 
   final PreflightResult result;
 
+  /// What the engine handed the walk for hop 1. Null means "dial by name".
+  InternetAddress? sawFirstHopAddress;
+  bool ran = false;
+
   @override
   Future<PreflightResult> run(
     ProxyChain chain, {
     ChainCredentials? credentials,
-  }) async =>
-      result;
+    InternetAddress? firstHopAddress,
+  }) async {
+    ran = true;
+    sawFirstHopAddress = firstHopAddress;
+    return result;
+  }
 }
 
 // -----------------------------------------------------------------------
@@ -707,12 +986,21 @@ class _ChannelHarness {
   final List<String> calls = <String>[];
   FutureOr<Object?> Function(MethodCall call)? handler;
 
-  AndroidVpnEngine engine({ChainPreflight Function()? preflight}) =>
+  AndroidVpnEngine engine({
+    ChainPreflight Function()? preflight,
+    HostPin? hostPin,
+    String? apiBaseUrl,
+    HostResolver? hostResolver,
+  }) =>
       AndroidVpnEngine(
         methodChannel: const MethodChannel(_methodName),
         statusChannel: const EventChannel(_statusName),
         statsChannel: const EventChannel(_statsName),
         preflightFactory: preflight,
+        hostPin: hostPin,
+        apiBaseUrl: apiBaseUrl,
+        hostResolver: hostResolver,
+        resolveTimeout: const Duration(milliseconds: 400),
         // Milliseconds rather than seconds: the property under test is
         // that every wait is bounded, not how long the bound is.
         connectTimeout: const Duration(milliseconds: 400),

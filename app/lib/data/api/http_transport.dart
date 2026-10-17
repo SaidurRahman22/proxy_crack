@@ -4,8 +4,10 @@ import 'dart:io';
 
 import 'package:http/http.dart' as http;
 
+import '../../core/net/host_pin.dart';
 import 'api_config.dart';
 import 'api_failure.dart';
+import 'pinned_http_client.dart';
 import 'transport.dart';
 
 /// Talks to Django over HTTP.
@@ -14,11 +16,20 @@ import 'transport.dart';
 /// [ApiFailure] here, so nothing above this file ever catches a
 /// `SocketException`, a `FormatException` or an `http.ClientException`.
 class HttpTransport implements Transport {
+  /// [hostPin] is P26's mitigation: while a tunnel is up, the API host is
+  /// dialled at the address resolved before the TUN existed, because our own
+  /// DNS cannot be kept out of the chain — `netd` resolves as root, so the
+  /// UID the `process` rule matches is not on those packets. See
+  /// `core/net/host_pin.dart`.
+  ///
+  /// Null, or an unpinned [HostPin], behaves exactly as the plain client
+  /// did: every host is resolved normally.
   HttpTransport({
     required this.config,
     required this.readAccessToken,
     http.Client? client,
-  }) : _client = client ?? http.Client(),
+    HostPin? hostPin,
+  }) : _client = client ?? createPinnedHttpClient(hostPin ?? HostPin()),
        _ownsClient = client == null;
 
   final ApiConfig config;

@@ -30,7 +30,14 @@ from billing.models import (
     UsageLog,
 )
 from core.models import Content
-from proxies.models import ChainHop, Proxy, ProxyChain, ProxyProtocol, UploadBatch
+from proxies.models import (
+    ChainHop,
+    IpIntelRecord,
+    Proxy,
+    ProxyChain,
+    ProxyProtocol,
+    UploadBatch,
+)
 
 User = get_user_model()
 
@@ -487,6 +494,10 @@ class AdminProxyListSerializer(serializers.ModelSerializer):
             "port",
             "country",
             "city",
+            # Operator-set, and NOT derivable from anything else here: an
+            # ASN says which network an address sits on, never who was
+            # paid for it. See proxies.diversity.
+            "provider",
             "tier",
             "is_enabled",
             # --- health, all derived -------------------------------
@@ -625,6 +636,159 @@ class ProbeRequestSerializer(serializers.Serializer):
                 f"for anything larger."
             )
         return unique
+
+
+# ---------------------------------------------------------------------------
+# IP intelligence (R2)
+# ---------------------------------------------------------------------------
+
+
+class AdminIpIntelRecordSerializer(serializers.ModelSerializer):
+    """One cached origin lookup, entirely read-only.
+
+    Nothing here is operator-editable. A hand-typed ASN would be
+    overwritten by the next refresh, and worse, it would make the
+    diversity analysis report a correlation that nobody measured -- the
+    one thing this feature must never do.
+    """
+
+    is_fresh = serializers.SerializerMethodField()
+    is_known = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = IpIntelRecord
+        fields = (
+            "id",
+            "query",
+            "ip",
+            "asn",
+            "asn_org",
+            "prefix",
+            "country",
+            "registry",
+            "status",
+            "source",
+            "detail",
+            "looked_up_at",
+            "expires_at",
+            "is_fresh",
+            "is_known",
+        )
+        read_only_fields = fields
+
+    def get_is_fresh(self, obj):
+        return obj.is_fresh()
+
+
+# A host, not a URL and not a connection string. Hostnames, IPv4 and IPv6
+# literals only.
+#
+# This is stricter than it looks like it needs to be, because the
+# candidate endpoint feeds these straight into `getaddrinfo` and a DNS
+# query. Staff-only and throttled is not a reason to accept
+# `http://internal/admin?x=` and find out what the resolver does with it.
+_HOST_RE = re.compile(r"^[A-Za-z0-9.\-:\[\]_]{1,255}$")
+
+
+def _validate_host(value):
+    host = (value or "").strip()
+    if not host:
+        raise serializers.ValidationError("A host or IP address is required.")
+    if not _HOST_RE.match(host):
+        raise serializers.ValidationError(
+            "Must be a hostname or IP address -- no scheme, port, path or "
+            "credentials."
+        )
+    return host
+
+
+class IntelCandidateSerializer(serializers.Serializer):
+    """One prospective proxy, which need not exist in the inventory."""
+
+    host = serializers.CharField(max_length=255)
+    provider = serializers.CharField(
+        max_length=100,
+        required=False,
+        allow_blank=True,
+        help_text="Which vendor is offering this endpoint. Optional, but "
+        "it is the whole point of the exercise: two addresses on two ASNs "
+        "from one vendor are one commercial relationship, and nothing in "
+        "the ASN data can tell you that.",
+    )
+    country = serializers.CharField(
+        max_length=64, required=False, allow_blank=True
+    )
+    label = serializers.CharField(max_length=100, required=False, allow_blank=True)
+
+    def validate_host(self, value):
+        return _validate_host(value)
+
+
+class IntelCandidateAnalysisSerializer(serializers.Serializer):
+    """`POST /api/admin/intel/candidates/` -- "are these three vendors
+    actually three operators?"
+
+    The operator's stated use case: paste in candidates from several
+    vendors and find out whether they represent different operators
+    *before* paying for a year of all three.
+
+    Capped like the probe endpoint and for the same reason -- this looks
+    up synchronously in the request worker, against a rate-limited third
+    party. At 60 lookups a minute, 25 uncached hosts is already most of a
+    held worker-minute.
+    """
+
+    candidates = serializers.ListField(
+        child=IntelCandidateSerializer(), allow_empty=False
+    )
+    refresh = serializers.BooleanField(
+        default=False,
+        help_text="Re-query the source even for hosts already cached and "
+        "still fresh. Off by default: an ASN assignment does not change "
+        "between two clicks, and the cache is what keeps us welcome at a "
+        "free service.",
+    )
+
+    def validate_candidates(self, value):
+        cap = int(getattr(settings, "IP_INTEL_API_MAX_HOSTS", 25))
+        if len(value) > cap:
+            raise serializers.ValidationError(
+                f"At most {cap} candidates per request; lookups run "
+                f"synchronously and are rate limited. Use the "
+                f"`refresh_ip_intel` management command for anything larger."
+            )
+        return value
+
+
+class IntelRefreshSerializer(serializers.Serializer):
+    """`POST /api/admin/intel/refresh/` -- look these up now.
+
+    Takes inventory ids, bare hosts, or both. Ids are the normal path from
+    the SPA (select rows, refresh them); hosts exist so an operator can
+    refresh something they have not imported yet without inventing a proxy
+    row for it.
+    """
+
+    ids = serializers.ListField(
+        child=serializers.IntegerField(min_value=1),
+        required=False,
+        max_length=MAX_IDS,
+    )
+    hosts = serializers.ListField(
+        child=serializers.CharField(max_length=255), required=False
+    )
+    force = serializers.BooleanField(default=False)
+
+    def validate_hosts(self, value):
+        return [_validate_host(host) for host in value]
+
+    def validate(self, attrs):
+        if not attrs.get("ids") and not attrs.get("hosts"):
+            raise serializers.ValidationError(
+                "Give `ids` (proxies to refresh) or `hosts` (addresses to "
+                "look up), or both."
+            )
+        return attrs
 
 
 # ---------------------------------------------------------------------------

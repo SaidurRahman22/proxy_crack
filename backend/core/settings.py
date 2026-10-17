@@ -189,6 +189,12 @@ REST_FRAMEWORK = {
         # constrained hop is a query against the inventory, and an
         # unthrottled one is an oracle for enumerating it.
         "chain_resolve": env("THROTTLE_CHAIN_RESOLVE", "120/hour"),
+        # Chain diversity. Reads cached intel only and never emits a
+        # lookup, so it is cheap -- but an ad-hoc analysis takes a list of
+        # proxy ids, which makes it another way to ask questions about the
+        # inventory, so it is bounded like the resolver rather than like a
+        # static read.
+        "chain_diversity": env("THROTTLE_CHAIN_DIVERSITY", "240/hour"),
         "usage_report": env("THROTTLE_USAGE_REPORT", "120/hour"),
         "content": env("THROTTLE_CONTENT", "60/hour"),
         # --- Admin API ---------------------------------------------------
@@ -225,6 +231,13 @@ REST_FRAMEWORK = {
         # scheduled `probe_proxies` command is the normal path, and this
         # endpoint is the "check these twelve right now" button beside it.
         "admin_probe": env("THROTTLE_ADMIN_PROBE", "30/hour"),
+        # IP intel lookups. Tighter than the probe endpoint for a reason
+        # the probe endpoint does not have: probing spends OUR bandwidth
+        # against proxies we pay for, while this spends a free third
+        # party's. Getting the project blocked by Team Cymru would take
+        # the feature out for everyone, so the budget is small and the
+        # management command is the bulk path.
+        "admin_intel": env("THROTTLE_ADMIN_INTEL", "20/hour"),
     },
     "EXCEPTION_HANDLER": "api.exceptions.api_exception_handler",
 }
@@ -394,6 +407,64 @@ PROXY_UNPROBED_SCORE = float(env("PROXY_UNPROBED_SCORE", "50.0"))
 # list is capped far below MAX_IDS. 50 proxies x a 10 s timeout is already
 # a worker held for most of a minute in the worst case.
 PROXY_PROBE_API_MAX_IDS = env_int("PROXY_PROBE_API_MAX_IDS", 50)
+
+
+# ---------------------------------------------------------------------------
+# IP intelligence and chain diversity scoring (R2).
+#
+# `proxies.diversity` needs one fact per hop the inventory does not hold:
+# which AS originates the address. `proxies.intel` fetches it and caches it.
+#
+# The default source is Team Cymru's DNS-based IP-to-ASN mapping: free, no
+# account, no API key, and the service the rest of the industry already
+# uses for this. Swap it for proxies.intel.IpApiIntel where outbound DNS is
+# blocked -- at the cost of the prefix and registry fields, which that
+# source does not publish.
+# ---------------------------------------------------------------------------
+
+IP_INTEL_BACKEND = env("IP_INTEL_BACKEND", "proxies.intel.CymruDnsIpIntel")
+
+# Resolvers for the DNS source, comma-separated. Empty means "read
+# /etc/resolv.conf", and on a host with no resolv.conf (Windows) it means
+# the lookup refuses to run.
+#
+# There is deliberately NO public-resolver default. The queries are a list
+# of the operator's proxy inventory, one host at a time; handing that list
+# to a third-party resolver to save a configuration line would be exactly
+# the disclosure this product exists to prevent. An inconvenient setting is
+# the right trade.
+IP_INTEL_DNS_RESOLVERS = env_list("IP_INTEL_DNS_RESOLVERS")
+
+# Per-lookup budget. Lower than the probe timeout: a DNS TXT query that has
+# not answered in a few seconds is not going to.
+IP_INTEL_TIMEOUT_SECONDS = float(env("IP_INTEL_TIMEOUT_SECONDS", "5"))
+
+# How hard the cache holds on. An ASN assignment moves on the order of
+# years, so a month of staleness is a far smaller error than querying a
+# free service on every page render. Failures expire in hours instead, so
+# one DNS outage does not pin a host to "unknown" until next quarter --
+# "unknown" is the state this feature exists to get out of.
+IP_INTEL_TTL_DAYS = env_int("IP_INTEL_TTL_DAYS", 30)
+IP_INTEL_NEGATIVE_TTL_HOURS = env_int("IP_INTEL_NEGATIVE_TTL_HOURS", 6)
+
+# Politeness, and the reason lookups are serial rather than threaded. This
+# is somebody else's free service; 60/minute is roughly what Team Cymru's
+# own guidance asks of DNS clients, and it is the brake that keeps a
+# 10,000-row refresh from looking like an attack.
+IP_INTEL_RATE_LIMIT_PER_MINUTE = env_int("IP_INTEL_RATE_LIMIT_PER_MINUTE", 60)
+
+# Candidate evaluation (`POST /api/admin/intel/candidates/`) looks hosts up
+# synchronously in the request worker, exactly like the probe endpoint, so
+# the list is capped for the same reason. At the default rate limit, 25
+# uncached hosts is already 25 seconds of held worker.
+IP_INTEL_API_MAX_HOSTS = env_int("IP_INTEL_API_MAX_HOSTS", 25)
+
+# Bloc map for the jurisdiction check. `None` means use
+# proxies.jurisdictions.DEFAULT_BLOCS. Set this to a dict to replace it
+# entirely -- which groupings matter is a political judgement that changes
+# and that reasonable operators disagree about, so it is configuration
+# rather than an assertion in code.
+PROXY_JURISDICTION_BLOCS = None
 
 
 # ---------------------------------------------------------------------------

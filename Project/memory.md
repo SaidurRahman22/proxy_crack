@@ -120,7 +120,7 @@ still works (the naive fix breaks the second).
 | ~~P1~~ | ~~sing-box vs Xray-core~~ | **RESOLVED → D9. Xray-core via libXray.** | — |
 | P2 | Play Store **display name** | "Proxy Crack" reads as piracy tooling; rejection risk. `AndroidManifest` still says `proxy_crack`. | Phase 6, but pick early |
 | P3 | `git config user.name` | Commits currently have no author name | **every commit — nothing is committed yet** |
-| P4 | Paid proxy provider + their ToS | Many providers forbid redistribution via an app | Phase 1 data model |
+| **P4** | 🔴 **CONCRETE RISK — provider is Webshare, and their ToS prohibits redistribution.** Webshare's *Restricted Activities* page lists **"Unauthorized Service Redistribution"**: resale or redistribution requires **explicit written consent**, and violations can mean account restriction, KYC verification, or permanent suspension. Serving purchased Webshare proxies to paying subscribers **is** redistribution. This threatens the business model, not just a feature. Three ways out: (a) get written consent / a reseller agreement from Webshare, (b) move to a provider with a white-label or reseller programme, (c) **switch to bring-your-own-proxy** — sell the *client* (chaining, health, failover, kill switch) rather than the proxies, which removes the ToS problem, the credential-custody risk (P8) and the entire cost base at once. | **the business model** |
 | P5 | **Wintun redistribution consent** | Xray bundles `wintun.dll` under WireGuard LLC's Prebuilt Binaries Licence, which bars redistribution without written consent except via a "Permitted API" carve-out. Runtime loading *appears* to qualify — needs a lawyer. Wintun is **mandatory** for Windows TUN. Engine-neutral (sing-box uses it too). **Long lead time.** | Windows release |
 | P6 | **Desktop payment rail** | Play Billing is mandatory for Android *only*. Desktop needs Stripe/Paddle or similar, and one subscription must unlock all four clients. | Phase 5 |
 | P7 | **UDP strategy for HTTP hops** | An HTTP hop cannot carry UDP (TCP only). Any chain containing one is TCP-only — no QUIC, WebRTC, VoIP, games. Needs `Proxy.supports_udp`, a chain-level `supportsUdp`, a UI warning, a UDP-blackhole rule, and server-side validation. Worse on desktop where browsers prefer QUIC. | Phase 2 data model |
@@ -185,8 +185,9 @@ migration chain.
 | # | Item | Why it beats proxychains | Status |
 |---|---|---|---|
 | **R1** | **Health checking, quality scoring, positional failover** | proxychains discovers a dead hop by failing on it — no probe, no failover, no quality notion | ✅ **DONE** — 438 tests (193 new), verified |
-| R2 | ASN / jurisdiction / operator diversity scoring | proxychains will happily build a 3-hop chain inside one datacenter and say nothing | queued |
+| **R2** | ASN / jurisdiction / operator diversity scoring | proxychains will happily build a 3-hop chain inside one datacenter and say nothing | ✅ **DONE 2026-10-17** — 792 tests (164 new) |
 | R3 | Kill switch, DNS through tunnel, leak tests | proxychains leaks on failure; `proxy_dns` is a known-weak hack | blocked on Phase 3 engine |
+| **R9** | **Provider sync (Webshare API)** | **NEW, and higher priority than it looks.** Nothing talks to the provider: you load a fraction of the IPs you pay for, rotation silently decays inventory, and bandwidth is invisible. Also feeds `Proxy.provider`, which R2's operator-diversity check depends on. | 🔴 **not built — next** |
 | R4 | Latency-budgeted chain composition | proxychains makes you hand-edit a config and find out by trying | queued |
 | R5 | Per-app split tunnelling | `VpnService` supports it natively; proxychains needs a shell prefix per command | blocked on Phase 3 |
 | R6 | UDP support + HTTP-hop warning | proxychains is TCP-only; SOCKS5/SS carry UDP, HTTP does not (see P7) | queued |
@@ -306,6 +307,57 @@ Purely additive; the Phase 1 log line is byte-for-byte unchanged.
 |---|---|
 | **PostgreSQL trigger reviewed but never executed** | Dev DB is SQLite, so only that branch is exercised. Needs PG 11+ for `EXECUTE FUNCTION`. Validate before the Postgres move. |
 | **`TransactionTestCase` / `manage.py flush`** | Both use `DELETE FROM`, which the trigger refuses for rows under 30 days. Nothing hits it today; a future test that audits something will fail at teardown with a message naming the migration. |
+
+### R2 design decisions (2026-10-17)
+
+| # | Decision | Why |
+|---|---|---|
+| **D20** | **`unknown` ranks ABOVE `high` in the severity ladder** (`critical:0, unknown:1, high:2…`) | A hop with no ASN data is not a diverse hop — it is a hop nobody checked. An operator can act on a known problem far more easily than on an unmeasured one. |
+| **D21** | **Coverage ceiling: `50 + 50 × coverage`** | Makes "unknown is not a pass" *structural* rather than advisory. No amount of clean findings lifts a chain nobody looked up above 50 — mirroring `PROXY_UNPROBED_SCORE` and D15. |
+| **D22** | **No public DNS resolver by default.** Lookups fail with a message naming the setting rather than falling back to 8.8.8.8 | The queries *are* the operator's proxy inventory, one host at a time. Handing that list to Google or Cloudflare to save a config line is precisely the disclosure this product exists to prevent. Deliberately more annoying than a default. |
+| **D23** | **Provider names pseudonymised for mobile clients** ("Vendor A/B/C"), applied at the **input** stage, not by scrubbing output | Serving real vendor names to subscribers publishes the operator's supply chain — and given **P4** (Webshare forbids redistribution), that is our own API handing out evidence of the thing the terms forbid. Input-stage substitution means no code path can reintroduce the real name by formatting a string a scrubber did not anticipate. |
+| **D24** | Score is **derived from the findings**, never set independently | It can never disagree with the findings shown, and de-duplication automatically prevents double penalties. |
+| **D25** | **Operator identity compared via `entity_key()`** — collapses all non-alphanumerics | Registries write `GLOBAL-TRANSIT-LLC` where humans write `Global Transit LLC`. Two ASNs of one company routinely differ by nothing else, so a naive comparison fails *exactly* in the case the feature exists to catch. Found by running the demo, not by a test. |
+
+**Headline capability:** `POST /api/admin/intel/candidates/` analyses hosts that are **not in the
+inventory** — paste candidate IPs from several vendors and learn whether you bought three
+operators or one wearing three hats, *before* paying for a year of all three.
+
+### Flutter ↔ API wiring (2026-10-17) — shipped, plus the API friction it exposed
+
+App now talks to live Django: 46 tests, `analyze` clean, verified on `emulator-5554` with a real
+account loading the real proxy and its R1 health data.
+
+**🔴 Ship-blocking bug found: `android.permission.INTERNET` was only in the debug and profile
+manifests, not `main`.** Debug builds worked; **a release build would have had no network at
+all** — and that only surfaces in production. Fixed.
+
+New open items, ordered by severity:
+
+| # | Issue | Why it matters |
+|---|---|---|
+| **P16** | **The 60/hour `proxy_credentials` budget does not scale with chain length.** A 3-hop chain costs 3 per connect *and* 3 per failover. A flaky session exhausts it in ~20 minutes and locks the user out of connecting for an hour. | Product-breaking under exactly the conditions failover exists for. Fix: scale the budget by `max_chain_length`, or have `/resolve/` mint a short-lived grant. |
+| **P17** | **No mobile `logout` endpoint.** Sign-out is local only; the refresh token stays valid up to 30 days. | Fine for a tidy user, wrong for a stolen phone. |
+| **P18** | **No way to resolve an *unsaved* chain.** `/resolve/` requires a saved chain, so "connect with these three" forces a `POST /api/chains/` first — spending `chain_write` budget and leaving a preset row the user never asked for. | `POST /api/chains/resolve/`, mirroring the ad-hoc diversity endpoint, removes a whole class of junk rows. |
+| **P19** | **`credentials_url` uses `request.build_absolute_uri`** — it echoes whatever `Host` header arrived, so behind a reverse proxy it points somewhere the device cannot reach. Only the path is authoritative. | Return a relative path, or just the proxy id. Client currently re-bases it defensively. |
+| **P20** | **`error.detail` has three shapes, two of them maps** (entitlement `{message,…}` vs DRF `{field:[msg]}`). Client discriminates by probing for a `message` key — breaks the first time a field is named `message`. | Add a discriminator. |
+| **P21** | **`Plan.price` is a decimal string.** Correct DRF, but every client needs string→minor-unit parsing, and the obvious `double * 100` reintroduces float rounding **on money**. | Add `price_cents` alongside. |
+| **P22** | **`Proxy.country` is free text and often blank** — the one real proxy has no country *or* city, so the UI renders `--`. | R2's intel layer already resolves country per hop from the IP. Backfilling `Proxy.country` from it would fix this for free. |
+| **P23** | `DJANGO_ALLOWED_HOSTS` dev default lacks `10.0.2.2`, so emulator requests get **400 DisallowedHost with an HTML body** — the client sees a parse failure, not a routing error. | One line in `.env.example` saves the next person an hour. |
+
+### 2026-10-17 — operator-reported issues
+
+| # | Issue | Resolution |
+|---|---|---|
+| **UX-1** | **The API base URL was printed on the sign-in screen.** | ✅ Fixed — now `kDebugMode` only. It is a developer affordance: noise to a user, and it publishes our infrastructure to anyone holding the phone. |
+| **UX-2** | **No way to know how to sign in.** The app went from mock data (no login) to real auth (login required) with no documented account. | ✅ Fixed — [`ACCESS.md`](../ACCESS.md) at the repo root, **gitignored**, with every credential and the "free tier sees zero proxies" trap spelled out. |
+| **UX-3** | **Admin console inaccessible** — defaults to mock, and the mock credentials differ from the real ones. | ✅ Documented in `ACCESS.md`, both modes. |
+| **OPS-1** | **Only 1 of 10 Webshare IPs loaded, and nothing auto-syncs.** | 🔴 Open → **R9**. No provider integration exists. |
+
+### Credentials — where they live
+
+`ACCESS.md` at the repo root. **Gitignored** (`.gitignore` matches `ACCESS.md` and `**/ACCESS.md`;
+verified with `git check-ignore`). Never commit it, never paste it into chat.
 
 ### Positions taken
 

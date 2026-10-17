@@ -37,95 +37,127 @@ class ProxyListTile extends StatelessWidget {
     final tokens = context.tokens;
     final scheme = Theme.of(context).colorScheme;
 
-    return Semantics(
-      selected: isSelected,
-      button: true,
-      label: '${proxy.city}, ${proxy.country}. '
-          '${proxy.protocol.label}. '
-          '${proxy.isAlive ? '${proxy.latencyMs} milliseconds' : 'offline'}. '
-          '${proxy.isPremium ? 'Premium. ' : ''}'
-          '${isInChain ? 'In your chain.' : ''}',
-      excludeSemantics: true,
-      child: Material(
-        color: isSelected ? scheme.secondary : scheme.surfaceContainer,
-        borderRadius: BorderRadius.circular(AppRadius.card),
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          onTap: onTap,
-          child: Container(
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(AppRadius.card),
-              border: Border.all(
-                color: isInChain ? tokens.accent.withValues(alpha: 0.45)
-                    : tokens.border,
-              ),
-            ),
-            padding: const EdgeInsets.all(AppSpacing.sm + AppSpacing.xs),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                CountryBadge(proxy.countryCode),
-                const SizedBox(width: AppSpacing.sm + AppSpacing.xs),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: <Widget>[
-                      Text(
-                        proxy.location,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: context.text.titleSmall,
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        proxy.endpoint,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: context.text.bodySmall,
-                      ),
-                      const SizedBox(height: AppSpacing.sm - 2),
-                      Wrap(
-                        spacing: AppSpacing.sm - 2,
-                        runSpacing: AppSpacing.xs,
-                        crossAxisAlignment: WrapCrossAlignment.center,
-                        children: <Widget>[
-                          ProtocolBadge(proxy.protocol),
-                          AliveIndicator(isAlive: proxy.isAlive),
-                          if (proxy.isPremium)
-                            TagChip(
-                              label: 'PREMIUM',
-                              icon: Icons.workspace_premium_outlined,
-                              color: tokens.warning,
-                              dense: true,
+    // The description and the add control are two SEPARATE semantic nodes.
+    // Wrapping the whole row in `excludeSemantics: true` — which is what
+    // this did — swallowed the add button along with the text, so the one
+    // control on the row that changes anything was invisible to TalkBack.
+    return Material(
+      color: isSelected ? scheme.secondary : scheme.surfaceContainer,
+      borderRadius: BorderRadius.circular(AppRadius.card),
+      clipBehavior: Clip.antiAlias,
+      child: Container(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(AppRadius.card),
+          border: Border.all(
+            color: isInChain
+                ? tokens.accent.withValues(alpha: 0.45)
+                : tokens.border,
+          ),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Expanded(
+              child: Semantics(
+                selected: isSelected,
+                button: true,
+                label: '${proxy.location}. '
+                    '${proxy.protocol.label}. '
+                    '${proxy.isAlive ? '${proxy.effectiveLatencyMs ?? 0} milliseconds' : 'offline'}. '
+                    '${proxy.isUnprobed ? 'Never probed. ' : 'Quality score ${proxy.qualityScore.round()} of 100. '}'
+                    '${proxy.isPremium ? 'Premium. ' : ''}'
+                    '${isInChain ? 'In your chain.' : ''}',
+                excludeSemantics: true,
+                child: InkWell(
+                  onTap: onTap,
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(
+                      AppSpacing.sm + AppSpacing.xs,
+                      AppSpacing.sm + AppSpacing.xs,
+                      AppSpacing.sm,
+                      AppSpacing.sm + AppSpacing.xs,
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        CountryBadge(proxy.countryCode),
+                                const SizedBox(width: AppSpacing.sm + AppSpacing.xs),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: <Widget>[
+                                      Text(
+                                        proxy.location,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: context.text.titleSmall,
+                                      ),
+                                      const SizedBox(height: 2),
+                                      Text(
+                                        proxy.endpoint,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: context.text.bodySmall,
+                                      ),
+                                      const SizedBox(height: AppSpacing.sm - 2),
+                                      Wrap(
+                                        spacing: AppSpacing.sm - 2,
+                                        runSpacing: AppSpacing.xs,
+                                        crossAxisAlignment: WrapCrossAlignment.center,
+                                        children: <Widget>[
+                                          ProtocolBadge(proxy.protocol),
+                                          AliveIndicator(isAlive: proxy.isAlive),
+                                          // R1 health, straight from the server's probe
+                                          // aggregate. The user choosing a hop is entitled
+                                          // to know it drops a third of its connections —
+                                          // that is the whole reason this replaced a bare
+                                          // alive/dead boolean.
+                                          HealthBadge(proxy: proxy),
+                                          if (proxy.isPremium)
+                                            TagChip(
+                                              label: 'PREMIUM',
+                                              icon: Icons.workspace_premium_outlined,
+                                              color: tokens.warning,
+                                              dense: true,
+                                            ),
+                                        ],
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                        const SizedBox(width: AppSpacing.sm),
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          mainAxisSize: MainAxisSize.min,
+                          children: <Widget>[
+                            LatencyLabel(proxy: proxy),
+                            const SizedBox(height: 2),
+                            Text(
+                              proxy.probeCount == 0
+                                  ? 'never probed'
+                                  : Format.relativeTime(proxy.lastChecked),
+                              style: context.text.bodySmall?.copyWith(
+                                fontSize: 11,
+                              ),
                             ),
-                        ],
-                      ),
-                    ],
+                          ],
+                        ),
+                      ],
+                    ),
                   ),
                 ),
-                const SizedBox(width: AppSpacing.sm),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  mainAxisSize: MainAxisSize.min,
-                  children: <Widget>[
-                    LatencyLabel(proxy: proxy),
-                    const SizedBox(height: 2),
-                    Text(
-                      Format.relativeTime(proxy.lastChecked),
-                      style: context.text.bodySmall?.copyWith(fontSize: 11),
-                    ),
-                  ],
-                ),
-                const SizedBox(width: AppSpacing.xs),
-                _AddControl(
-                  isInChain: isInChain,
-                  locked: locked,
-                  onPressed: onToggleInChain,
-                ),
-              ],
+              ),
             ),
-          ),
+            Padding(
+              padding: const EdgeInsets.only(right: AppSpacing.xs),
+              child: _AddControl(
+                isInChain: isInChain,
+                locked: locked,
+                onPressed: onToggleInChain,
+              ),
+            ),
+          ],
         ),
       ),
     );

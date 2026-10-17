@@ -40,14 +40,14 @@ class _ProxyBrowserScreenState extends State<ProxyBrowserScreen> {
       final index =
           controller.chain.hops.indexWhere((h) => h.proxy.id == proxy.id);
       controller.removeHopAt(index);
-      _notify('Removed ${proxy.countryCode} from the chain.');
+      _notify('Removed ${proxy.shortLabel} from the chain.');
       return;
     }
 
     final rejection = controller.addHop(proxy);
     if (rejection == null) {
       _notify(
-        'Added ${proxy.countryCode} as hop ${controller.chain.length}.',
+        'Added ${proxy.shortLabel} as hop ${controller.chain.length}.',
         actionLabel: 'View chain',
         onAction: widget.onOpenChain,
       );
@@ -380,11 +380,16 @@ class _ProxyList extends StatelessWidget {
   Widget build(BuildContext context) {
     return controller.proxies.map(
       loading: () => const ListSkeleton(label: 'Loading proxy list'),
-      error: (message, detail) => ErrorStateView(
+      error: (message, detail, failure) => FailureStateView(
         message: message,
-        detail: 'The server list could not be fetched. '
-            'Your connection may be blocked.',
-        onRetry: controller.refreshProxies,
+        detail: detail,
+        failure: failure,
+        // `reload`, not `refreshProxies`: an outage takes the account call
+        // down with the list, and reloading only the list leaves the
+        // entitlements unknown — so every premium row stays locked behind a
+        // padlock the user cannot explain. A retry after an outage should
+        // put the whole screen back.
+        onRetry: controller.reload,
       ),
       data: (all) {
         if (all.isEmpty) {

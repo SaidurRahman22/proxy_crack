@@ -32,10 +32,12 @@ class PaywallScreen extends StatelessWidget {
 
           return controller.plans.map(
             loading: () => const _PaywallSkeleton(),
-            error: (message, detail) => ErrorStateView(
+            error: (message, detail, failure) => FailureStateView(
               message: message,
-              detail: 'Plan details could not be loaded, so nothing can be '
-                  'purchased right now.',
+              detail: detail ??
+                  'Plan details could not be loaded, so nothing can be '
+                      'purchased right now.',
+              failure: failure,
               onRetry: controller.load,
             ),
             data: (plans) {

@@ -11,6 +11,7 @@ import '../../shared/format.dart';
 import '../../shared/widgets/latency_notice.dart';
 import '../../shared/widgets/state_views.dart';
 import '../../shared/widgets/surface.dart';
+import 'widgets/diversity_panel.dart';
 import 'widgets/hop_card.dart';
 
 /// Compose an ordered chain of hops.
@@ -57,6 +58,9 @@ class ChainBuilderScreen extends StatelessWidget {
                   chain: chain,
                   editable: editable,
                   gutter: gutter,
+                  // On compact the list sits inside the page's scroll view,
+                  // so it must size to its children and not scroll itself.
+                  shrinkWrap: !size.supportsTwoPane,
                 );
 
           final sidePanel = _ChainFooter(
@@ -90,12 +94,39 @@ class ChainBuilderScreen extends StatelessWidget {
             );
           }
 
+          // Compact: the footer is no longer a fixed-height strip. With the
+          // latency notice, the dead-hop warning and the R2 panel it can be
+          // taller than the window, so on a phone the hop list and the
+          // footer share one scroll view instead of the footer being
+          // pinned — which overflowed by 276 px on a Pixel 8 with a
+          // one-hop chain the moment the diversity panel landed.
+          //
+          // The empty state keeps the old shape: `_EmptyChain` is a centred
+          // `MessageState` and needs bounded height, and with no chain
+          // there is no panel to make the footer tall.
+          if (chain.isEmpty) {
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: <Widget>[
+                header,
+                Expanded(child: hopList),
+                sidePanel,
+              ],
+            );
+          }
+
           return Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: <Widget>[
               header,
-              Expanded(child: hopList),
-              sidePanel,
+              Expanded(
+                child: SingleChildScrollView(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: <Widget>[hopList, sidePanel],
+                  ),
+                ),
+              ),
             ],
           );
         },
@@ -189,12 +220,14 @@ class _HopList extends StatelessWidget {
     required this.chain,
     required this.editable,
     required this.gutter,
+    this.shrinkWrap = false,
   });
 
   final AppController controller;
   final ProxyChain chain;
   final bool editable;
   final double gutter;
+  final bool shrinkWrap;
 
   @override
   Widget build(BuildContext context) {
@@ -213,6 +246,8 @@ class _HopList extends StatelessWidget {
         gutter,
         AppSpacing.md,
       ),
+      shrinkWrap: shrinkWrap,
+      physics: shrinkWrap ? const NeverScrollableScrollPhysics() : null,
       itemCount: chain.hops.length,
       buildDefaultDragHandles: false,
       onReorderItem: controller.moveHop,
@@ -299,6 +334,16 @@ class _ChainFooter extends StatelessWidget {
                 key: ValueKey<int>(chain.length),
                 chain: chain,
               ),
+            ),
+            const SizedBox(height: AppSpacing.md),
+            // R2. Fetched on an actual edit to the chain (debounced), never
+            // on a rebuild of this screen — the analysis is cheap but it is
+            // still a throttled call that asks questions about the
+            // inventory, and a screen that refetched on focus would spend
+            // the budget doing nothing.
+            DiversityPanel(
+              diversity: controller.diversity,
+              onRetry: controller.refreshDiversity,
             ),
             const SizedBox(height: AppSpacing.md),
             if (!chain.isHealthy)

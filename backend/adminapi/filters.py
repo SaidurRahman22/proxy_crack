@@ -11,6 +11,7 @@ per-resource filter having to remember to offer it.
 
 import django_filters
 from django.contrib.auth import get_user_model
+from django.db.models import Q
 from rest_framework.exceptions import ValidationError
 from rest_framework.filters import BaseFilterBackend
 
@@ -23,7 +24,15 @@ from billing.models import (
 )
 from adminapi.models import AdminAuditLog
 from core.models import Content, ContentKind
-from proxies.models import Proxy, ProxyChain, ProxyProtocol, ProxyTier, UploadBatch
+from proxies.models import (
+    IpIntelRecord,
+    IpIntelStatus,
+    Proxy,
+    ProxyChain,
+    ProxyProtocol,
+    ProxyTier,
+    UploadBatch,
+)
 
 User = get_user_model()
 
@@ -95,6 +104,15 @@ class AdminProxyFilter(django_filters.FilterSet):
     tier = django_filters.ChoiceFilter(choices=ProxyTier.choices)
     country = django_filters.CharFilter(field_name="country", lookup_expr="iexact")
     city = django_filters.CharFilter(field_name="city", lookup_expr="iexact")
+    # Exact-insensitive, not a substring match: "Webshare" and
+    # "Webshare Reseller" are two labels and conflating them in a filter
+    # would mis-state exactly the relationship this column exists to
+    # record. `search` already covers the substring case.
+    provider = django_filters.CharFilter(field_name="provider", lookup_expr="iexact")
+    has_provider = django_filters.BooleanFilter(
+        method="filter_has_provider",
+        label="Only proxies with (or without) a vendor recorded",
+    )
     is_alive = django_filters.BooleanFilter(field_name="is_alive")
     is_enabled = django_filters.BooleanFilter(field_name="is_enabled")
     upload_batch = django_filters.ModelChoiceFilter(queryset=UploadBatch.objects.all())
@@ -131,6 +149,13 @@ class AdminProxyFilter(django_filters.FilterSet):
         field_name="last_checked", lookup_expr="lt"
     )
 
+    def filter_has_provider(self, queryset, name, value):
+        if value is None:
+            return queryset
+        return (
+            queryset.exclude(provider="") if value else queryset.filter(provider="")
+        )
+
     def filter_unprobed(self, queryset, name, value):
         if value is None:
             return queryset
@@ -159,7 +184,53 @@ class AdminProxyFilter(django_filters.FilterSet):
             "min_consecutive_failures",
             "unprobed",
             "checked_before",
+            "provider",
+            "has_provider",
         ]
+
+
+class AdminIpIntelFilter(django_filters.FilterSet):
+    """Filters for the cached origin lookups.
+
+    `stale` is the one an operator reaches for: "what is the refresh
+    command about to re-query", which is a different question from "what
+    failed".
+    """
+
+    status = django_filters.ChoiceFilter(choices=IpIntelStatus.choices)
+    asn = django_filters.NumberFilter(field_name="asn")
+    country = django_filters.CharFilter(field_name="country", lookup_expr="iexact")
+    registry = django_filters.CharFilter(field_name="registry", lookup_expr="iexact")
+    source = django_filters.CharFilter(field_name="source", lookup_expr="iexact")
+    stale = django_filters.BooleanFilter(
+        method="filter_stale", label="Only records past their TTL"
+    )
+    unknown = django_filters.BooleanFilter(
+        method="filter_unknown",
+        label="Only records that carry no usable origin",
+    )
+
+    def filter_stale(self, queryset, name, value):
+        from django.utils import timezone
+
+        if value is None:
+            return queryset
+        now = timezone.now()
+        return (
+            queryset.filter(expires_at__lte=now)
+            if value
+            else queryset.filter(expires_at__gt=now)
+        )
+
+    def filter_unknown(self, queryset, name, value):
+        if value is None:
+            return queryset
+        known = Q(status=IpIntelStatus.OK) & Q(asn__isnull=False)
+        return queryset.exclude(known) if value else queryset.filter(known)
+
+    class Meta:
+        model = IpIntelRecord
+        fields = ["status", "asn", "country", "registry", "source", "stale", "unknown"]
 
 
 class AdminUploadBatchFilter(django_filters.FilterSet):

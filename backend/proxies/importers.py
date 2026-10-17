@@ -40,6 +40,7 @@ CANONICAL_HEADERS = (
     "country",
     "city",
     "tier",
+    "provider",
 )
 
 REQUIRED_HEADERS = ("protocol", "host", "port")
@@ -58,6 +59,9 @@ HEADER_ALIASES = {
     "cipher": "ss_method",
     "ss_cipher": "ss_method",
     "country_code": "country",
+    "vendor": "provider",
+    "seller": "provider",
+    "source": "provider",
 }
 
 PROTOCOL_ALIASES = {
@@ -73,7 +77,20 @@ PROTOCOL_ALIASES = {
 MAX_STORED_ERRORS = 200
 
 # Columns that are only written when the file actually carries them.
-OPTIONAL_COLUMNS = ("username", "password", "ss_method", "country", "city")
+OPTIONAL_COLUMNS = (
+    "username",
+    "password",
+    "ss_method",
+    "country",
+    "city",
+    # Who the operator paid. Follows the same absent-vs-empty rule as the
+    # rest: a file without the column leaves an existing label alone, a
+    # file with an empty cell clears it. Clearing it is not destructive the
+    # way clearing a credential is, but a silently blanked provider turns
+    # a shared-vendor finding into a false "different vendors", which is
+    # the exact reassurance this feature exists to withhold.
+    "provider",
+)
 
 # Of those, the ones whose loss is irrecoverable.
 CREDENTIAL_COLUMNS = ("username", "password", "ss_method")

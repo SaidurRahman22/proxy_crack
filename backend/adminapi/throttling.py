@@ -32,6 +32,7 @@ __all__ = [
     "AdminCredentialDailyThrottle",
     "AdminCredentialHourlyThrottle",
     "AdminCSVUploadThrottle",
+    "AdminIntelThrottle",
     "AdminLoginEmailThrottle",
     "AdminLoginIPThrottle",
     "AdminProbeThrottle",
@@ -129,6 +130,24 @@ class AdminBulkThrottle(UserRateThrottle):
 
 class AdminCSVUploadThrottle(UserRateThrottle):
     scope = "admin_csv_upload"
+
+
+class AdminIntelThrottle(UserRateThrottle):
+    """Bounds operator-triggered IP intelligence lookups.
+
+    Tighter than the probe throttle, and for a reason the probe throttle
+    does not have. Probing spends **our** bandwidth against proxies we
+    pay for; a lookup spends a free third party's service, and the cost of
+    exhausting their patience is not a slow dashboard -- it is the whole
+    feature going dark for everyone, with no way to appeal it.
+
+    The `refresh_ip_intel` management command is the bulk path and is rate
+    limited in its own right (`IP_INTEL_RATE_LIMIT_PER_MINUTE`); this
+    endpoint is the "check these candidates before I sign the invoice"
+    button beside it.
+    """
+
+    scope = "admin_intel"
 
 
 class AdminProbeThrottle(UserRateThrottle):

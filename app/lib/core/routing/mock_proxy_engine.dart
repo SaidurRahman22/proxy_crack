@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math';
 
 import '../../data/models/proxy_chain.dart';
+import '../../data/models/proxy_credentials.dart';
 import 'proxy_engine.dart';
 
 /// In-memory [ProxyEngine] used for UI development and widget tests.
@@ -78,8 +79,12 @@ class MockProxyEngine implements ProxyEngine {
         milliseconds: (ms / speedMultiplier).round().clamp(0, 60000),
       );
 
+  /// [credentials] is accepted and then dropped on the floor: there is no
+  /// engine here to hand them to. The parameter exists so the connect
+  /// *sequence* — resolve, fetch per hop, connect — is exercised end to end
+  /// before Phase 3, rather than being bolted on afterwards.
   @override
-  Future<void> connect(ProxyChain chain) async {
+  Future<void> connect(ProxyChain chain, {ChainCredentials? credentials}) async {
     if (_status.isConnected && _status.chain == chain) return;
     if (_status.isBusy) return;
 

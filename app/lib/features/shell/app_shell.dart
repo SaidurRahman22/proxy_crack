@@ -41,7 +41,13 @@ enum ShellTab {
 /// * tab state (scroll offset, filters) survives switching, because the
 ///   screens stay mounted inside an [IndexedStack].
 class AppShell extends StatefulWidget {
-  const AppShell({super.key});
+  const AppShell({super.key, this.accountLabel, this.onSignOut});
+
+  /// The signed-in address, shown on the connection screen so the user can
+  /// see which account's inventory they are looking at.
+  final String? accountLabel;
+
+  final VoidCallback? onSignOut;
 
   @override
   State<AppShell> createState() => _AppShellState();
@@ -78,7 +84,11 @@ class _AppShellState extends State<AppShell> {
         body: IndexedStack(
           index: _tab.index,
           children: <Widget>[
-            ConnectionScreen(onEditChain: () => _select(ShellTab.chain)),
+            ConnectionScreen(
+              onEditChain: () => _select(ShellTab.chain),
+              accountLabel: widget.accountLabel,
+              onSignOut: widget.onSignOut,
+            ),
             ProxyBrowserScreen(onOpenChain: () => _select(ShellTab.chain)),
             ChainBuilderScreen(
               onBrowseProxies: () => _select(ShellTab.proxies),

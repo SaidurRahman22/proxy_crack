@@ -31,6 +31,9 @@ router.register("usage-logs", views.AdminUsageLogViewSet, basename="usagelog")
 router.register("chains", views.AdminChainViewSet, basename="chain")
 # Hyphenated like the other multi-word prefixes above.
 router.register("audit-log", views.AdminAuditLogViewSet, basename="auditlog")
+# Cached IP-to-ASN lookups, plus the candidate-evaluation and refresh
+# actions hanging off the same prefix (R2).
+router.register("intel", views.AdminIntelViewSet, basename="intel")
 
 urlpatterns = [
     path("auth/login/", views.AdminLoginView.as_view(), name="auth-login"),

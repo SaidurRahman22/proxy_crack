@@ -43,10 +43,16 @@ class ChainHop {
         proxy: proxy ?? this.proxy,
       );
 
-  factory ChainHop.fromJson(Map<String, dynamic> json) => ChainHop(
-        id: json['id'] as int,
-        chainId: json['chain_id'] as int,
-        position: json['position'] as int,
+  /// ⚠️ The API's `ChainHopSerializer` emits **no `chain_id`** (the parent
+  /// is implied) and a **null `proxy`** for a constrained hop. This factory
+  /// is for a hop that is known to be pinned; the faithful wire shape is
+  /// `SavedChainHop`, and `SavedChain.toEditableChain()` is the only place
+  /// that converts between them.
+  factory ChainHop.fromJson(Map<String, dynamic> json, {int chainId = 0}) =>
+      ChainHop(
+        id: (json['id'] as num?)?.toInt() ?? 0,
+        chainId: (json['chain_id'] as num?)?.toInt() ?? chainId,
+        position: (json['position'] as num?)?.toInt() ?? 0,
         proxy: Proxy.fromJson(json['proxy'] as Map<String, dynamic>),
       );
 

@@ -540,6 +540,33 @@ class ProxyChainSerializer(serializers.ModelSerializer):
         return instance
 
 
+class ChainDiversityRequestSerializer(serializers.Serializer):
+    """`POST /api/chains/diversity/` -- score a chain before saving it.
+
+    The chain builder's whole value is warning *before* the user commits,
+    so this takes a list of proxy ids that need not correspond to any
+    saved chain.
+
+    Entitlement is re-checked here even though the analysis discloses no
+    credentials. A list endpoint that accepts arbitrary ids and reports
+    the country and network of each one is an inventory oracle if it is
+    not scoped, and `ProxyViewSet.get_queryset` scoping would not apply to
+    ids posted in a body.
+    """
+
+    proxy_ids = serializers.ListField(
+        child=serializers.IntegerField(min_value=1),
+        allow_empty=False,
+        max_length=ABSOLUTE_MAX_CHAIN_LENGTH,
+    )
+
+    def validate_proxy_ids(self, value):
+        # NOT de-duplicated. A chain listing the same proxy twice is
+        # exactly the mistake this feature exists to catch, and silently
+        # collapsing it would hide the worst possible finding.
+        return value
+
+
 class ResolvedHopSerializer(serializers.Serializer):
     """One slot of a resolved chain.
 

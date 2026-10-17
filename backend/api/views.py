@@ -36,6 +36,7 @@ from api.exceptions import (
 from api.filters import ProxyFilter
 from api.permissions import IsOwner
 from api.serializers import (
+    ChainDiversityRequestSerializer,
     ContentSerializer,
     EmailTokenObtainPairSerializer,
     PlanSerializer,
@@ -55,6 +56,11 @@ from billing.entitlements import (
 )
 from billing.models import Plan
 from core.models import Content, ContentKind
+from proxies.diversity import (
+    analyse_chain,
+    analyse_proxies,
+    pseudonymise_providers,
+)
 from proxies.models import ChainHop, Proxy, ProxyChain
 from proxies.resolution import ChainResolutionError, resolve_chain
 
@@ -184,13 +190,21 @@ class ProxyChainViewSet(viewsets.ModelViewSet):
     permission_classes = (IsAuthenticated, IsOwner)
 
     def get_throttles(self):
-        if getattr(self, "action", None) == "resolve":
+        action = getattr(self, "action", None)
+        if action == "resolve":
             self.throttle_scope = "chain_resolve"
+        elif action in ("diversity", "diversity_preview"):
+            self.throttle_scope = "chain_diversity"
         elif self.request.method not in ("GET", "HEAD", "OPTIONS"):
             self.throttle_scope = "chain_write"
         else:
             self.throttle_scope = None
         return super().get_throttles()
+
+    def get_serializer_class(self):
+        if getattr(self, "action", None) == "diversity_preview":
+            return ChainDiversityRequestSerializer
+        return super().get_serializer_class()
 
     def get_queryset(self):
         return (
@@ -254,6 +268,97 @@ class ProxyChainViewSet(viewsets.ModelViewSet):
                 ).data,
             }
         )
+
+
+    @action(
+        detail=True,
+        methods=["get"],
+        url_path="diversity",
+        url_name="diversity",
+    )
+    def diversity(self, request, pk=None):
+        """`GET /api/chains/{id}/diversity/` -- is this actually a chain?
+
+        The warning the chain builder shows before a user connects. A
+        3-hop chain whose hops share an ASN, a datacentre or a vendor
+        gives almost none of the protection the user thinks they bought,
+        and nothing else in the product would tell them.
+
+        **Resolved first.** A constrained hop has no proxy until it is
+        resolved, and the proxy that fills it is what will actually carry
+        traffic -- so the analysis is run against the resolution, not
+        against the saved definition. When resolution fails the request
+        still succeeds: the fixed hops are analysed, the unresolved
+        positions are reported as unknown, and `resolution.error` carries
+        the reason. A 409 here would be the wrong answer to "warn me about
+        this chain", and `POST /resolve/` is where a client finds out that
+        it cannot connect.
+
+        **GET, unlike `/resolve/`.** This reads cached intel and never
+        performs a lookup, so it is a representation rather than a
+        point-in-time decision, and a client must not be able to make the
+        server emit DNS by opening a screen.
+
+        **Vendor names are pseudonymised** -- "Vendor A", "Vendor B". The
+        user needs to know two hops came from one vendor; publishing
+        *which* vendor to every subscriber would hand out the operator's
+        supply chain, which P4 makes a live commercial risk.
+        """
+        chain = self.get_object()
+
+        resolved_proxies = None
+        resolution_error = None
+        try:
+            resolution = resolve_chain(chain, user=request.user)
+            resolved_proxies = [hop.proxy for hop in resolution.hops]
+        except ChainResolutionError as exc:
+            resolution_error = exc.as_detail()
+
+        report = analyse_chain(
+            chain,
+            resolved_proxies=resolved_proxies,
+            transform=pseudonymise_providers,
+        )
+        payload = report.as_dict()
+        payload["chain"] = {"id": chain.pk, "name": chain.name}
+        payload["analysed_at"] = timezone.now()
+        payload["resolution"] = {
+            "resolved": resolved_proxies is not None,
+            "error": resolution_error,
+        }
+        return Response(payload)
+
+    @action(
+        detail=False,
+        methods=["post"],
+        url_path="diversity",
+        url_name="diversity-preview",
+    )
+    def diversity_preview(self, request):
+        """`POST /api/chains/diversity/` -- score a chain before saving it.
+
+        Same analysis, over an ad-hoc ordered list of proxy ids, so the
+        builder can warn while the user is still assembling the chain
+        rather than after they have committed to it.
+
+        POST because the chain is in the body; it still performs no
+        lookups and writes nothing.
+        """
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        proxy_ids = serializer.validated_data["proxy_ids"]
+
+        entitlement = resolve_entitlement(request.user)
+        # Reuses the chain serializer's entitlement gate rather than
+        # repeating it: an id the user may not see must fail here exactly
+        # as it fails on write, with the same error code.
+        proxies = ProxyChainSerializer._check_proxies(proxy_ids, entitlement)
+
+        ordered = [proxies[pk] for pk in proxy_ids]
+        report = analyse_proxies(ordered, transform=pseudonymise_providers)
+        payload = report.as_dict()
+        payload["analysed_at"] = timezone.now()
+        return Response(payload)
 
 
 def _as_api_exception(exc):

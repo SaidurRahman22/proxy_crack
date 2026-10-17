@@ -134,6 +134,12 @@ class _Rail extends StatelessWidget {
       indicatorColor: Theme.of(context).colorScheme.primary,
       minWidth: 72,
       groupAlignment: -0.9,
+      // A phone in landscape is a *medium* window — ~411 dp tall on a
+      // Pixel 8 — and four labelled destinations plus the brand block do
+      // not fit in it. Without this the rail overflowed by 13 px, which is
+      // a yellow-and-black stripe on a shipping screen. Desktop windows are
+      // tall enough that nothing scrolls.
+      scrollable: true,
       leading: leading == null
           ? null
           : Padding(

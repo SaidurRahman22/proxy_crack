@@ -14,7 +14,7 @@
 | **What does not exist yet** | **The VPN engine.** No traffic is routed anywhere. This is Phase 3 and it is the biggest remaining build. |
 | **Repo** | `D:\project\Proxy`, branch `main`, **3 commits**, working tree clean |
 | **Remote** | `git@github.com:SaidurRahman22/proxy_crack.git` — ⚠️ **not pushed yet** (SSH key not registered on GitHub) |
-| **Backend tests** | **628 passing** |
+| **Backend tests** | **792 passing** |
 
 ---
 
@@ -22,14 +22,24 @@
 
 | Component | State | Detail |
 |---|---|---|
-| **Backend API** (`backend/`) | ✅ working | Django 5.2 + DRF, 13 models, 38 migrations, 628 tests |
+| **Backend API** (`backend/`) | ✅ working | Django 5.2 + DRF, 14 models, 39 migrations, 792 tests |
 | **Admin console** (`admin/`) | ✅ working | React + TS + Vite, runs against mock *or* live API |
-| **Mobile app** (`app/`) | 🟡 UI only | Flutter 3.47, 4 screens, adaptive layouts, **mock engine** |
+| **Mobile app** (`app/`) | ✅ wired to live API | Flutter 3.47, real auth + real data, 46 tests. Engine still mocked (Phase 3) |
 | **VPN engine** | ❌ not started | Phase 3. Xray-core via libXray decided (D9), nothing built |
 | **Desktop clients** | ❌ not started | Windows / Linux / macOS planned (D8), Android first |
 | **iOS** | ❌ blocked | Needs a Mac. Not buildable on this machine |
 
 ---
+
+## 🔑 Credentials
+
+**See [`ACCESS.md`](../ACCESS.md)** at the repo root — gitignored, never pushed.
+It has the sign-in details for the app, the admin console and Django admin, plus how to grant a
+plan and which env vars are required.
+
+Short version: the mobile app needs the dev account listed in `ACCESS.md`, and that
+account **must have a paid plan** — a free-tier account sees **zero** proxies, because the only
+real proxy is `premium`. That is entitlement working, not a bug.
 
 ## Run it right now
 
@@ -38,7 +48,7 @@
 cd D:\project\Proxy\backend
 .\.venv\Scripts\python.exe manage.py runserver 8000
 #   Django admin (fallback):  http://127.0.0.1:8000/admin/
-#   admin@proxycrack.local / ProxyCrack!Dev2026   <-- dev only, change it
+#   credentials: see ACCESS.md (gitignored)
 
 # Admin SPA (mock data by default)
 cd D:\project\Proxy\admin
@@ -59,6 +69,7 @@ flutter run            # needs the emulator: desktop shortcut "Android Emulator"
 | `prune_probes` | Trim probe history (30-day default) |
 | `prune_audit_log` | Trim audit history (365-day default, 90-day floor, dry-run by default) |
 | `rotate_proxy_credentials` | Re-encrypt credentials under a new key |
+| `refresh_ip_intel` | Refresh cached ASN / operator / country data |
 | `seed_plans` | Create the free + pro plans |
 
 ---
@@ -107,14 +118,35 @@ flutter run            # needs the emulator: desktop shortcut "Android Emulator"
 
 ## Next steps, in order
 
-1. **Push to GitHub** — add your SSH key, then `git push -u origin main`
-   ```
-   ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAHs6Vf6BIfdECYSsx0oFO7ij2ziuec8kZH2pz9O8Fcl VFI
-   ```
-2. **R2 — ASN / jurisdiction / operator diversity scoring.** Pure data work, no engine
-   changes, and the thing that makes a chain *meaningful* rather than merely long.
-3. **Phase 3 — the VPN engine.** The real risk. Everything before it is conventional work.
+1. ~~Push to GitHub~~ ✅ done — `origin/main` tracking, working tree clean
+2. ~~R2 — diversity scoring~~ ✅ **DONE.** Detects when "three vendors" are one operator.
+   Headline: `POST /api/admin/intel/candidates/` analyses hosts **not in inventory** — vet
+   candidate proxies *before* buying. ⚠️ Needs `IP_INTEL_DNS_RESOLVERS` set to do anything.
+3. **Wire the Flutter app to the real API.** ⬅️ agreed next, after R2.
+   The mobile app currently has **no HTTP client at all** — it is a UI shell over
+   `lib/data/mock/` with a `MockProxyEngine`. That was deliberate (built while the engine
+   licence question was open) but it means the app cannot see real data. Needs:
+   - typed API client in Dart against `/api/`
+   - auth: login, JWT in memory, refresh-on-401, secure refresh-token storage
+   - a real repository replacing `catalog_repository`'s mock, **behind the same interface**
+     so no screen changes
+   - loading / empty / error states wired to real failures
+   Sequenced after R2 deliberately, because R2 adds a chain-diversity endpoint the chain
+   builder should consume — wiring first would mean doing it twice.
+4. **Phase 3 — the VPN engine.** The real risk. Everything before it is conventional work.
    Resolve **P5 (Wintun)** in parallel since it has an external lead time.
+
+### Proxy inventory reality check
+The dev DB holds **one** real proxy (Webshare, HTTP, premium), added by hand.
+
+⚠️ **The Webshare free plan provides 10 IPs — only 1 is loaded**, and **nothing syncs
+automatically**. When Webshare rotates or replaces an IP, this database does not notice. There
+is no Webshare integration at all. See **R9** below.
+
+Also:
+- **one proxy is not a chain** — chaining needs ≥2 hops, and the product premise needs 3+
+- **it is HTTP, so any chain containing it is TCP-only** — no QUIC, VoIP or games (P7)
+- all hops from one vendor means **one operator sees both ends** — exactly what R2 detects
 
 ---
 

@@ -89,7 +89,7 @@ class ProxyChain {
 
   /// Country codes in order, e.g. `NL -> DE -> SG`.
   String get routeSummary =>
-      hops.map((h) => h.proxy.countryCode).join('  →  ');
+      hops.map((h) => h.proxy.shortLabel).join('  →  ');
 
   ProxyChain copyWith({String? name, List<ChainHop>? hops}) => ProxyChain(
         id: id,

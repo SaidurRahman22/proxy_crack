@@ -12,7 +12,14 @@ from django.urls import path, reverse
 
 from proxies.forms import ProxyCSVUploadForm
 from proxies.importers import CSVImportError, import_proxies_from_csv
-from proxies.models import ChainHop, Proxy, ProxyChain, ProxyProbe, UploadBatch
+from proxies.models import (
+    ChainHop,
+    IpIntelRecord,
+    Proxy,
+    ProxyChain,
+    ProxyProbe,
+    UploadBatch,
+)
 
 
 @admin.register(Proxy)
@@ -24,6 +31,7 @@ class ProxyAdmin(admin.ModelAdmin):
         "tier",
         "country",
         "city",
+        "provider",
         "is_enabled",
         "is_alive",
         "quality_score",
@@ -31,8 +39,8 @@ class ProxyAdmin(admin.ModelAdmin):
         "latency_p95_ms",
         "last_checked",
     )
-    list_filter = ("protocol", "tier", "is_enabled", "is_alive", "country")
-    search_fields = ("host", "country", "city")
+    list_filter = ("protocol", "tier", "is_enabled", "is_alive", "country", "provider")
+    search_fields = ("host", "country", "city", "provider")
     list_select_related = ("upload_batch",)
     change_list_template = "admin/proxies/proxy/change_list.html"
     # Derived from ProxyProbe by proxies.health. Editable here would mean
@@ -183,3 +191,46 @@ class ProxyChainAdmin(admin.ModelAdmin):
     search_fields = ("name", "user__email")
     autocomplete_fields = ("user",)
     inlines = (ChainHopInline,)
+
+
+@admin.register(IpIntelRecord)
+class IpIntelRecordAdmin(admin.ModelAdmin):
+    """Read-only. These rows are a cache of an upstream lookup, and a
+    hand-typed ASN would both be overwritten by the next refresh and, in
+    the meantime, make the diversity analysis report a correlation nobody
+    measured -- which is the one thing that feature must never do."""
+
+    list_display = (
+        "query",
+        "ip",
+        "asn",
+        "asn_org",
+        "prefix",
+        "country",
+        "status",
+        "looked_up_at",
+        "expires_at",
+    )
+    list_filter = ("status", "source", "country", "registry")
+    search_fields = ("query", "ip", "asn_org", "prefix")
+    readonly_fields = (
+        "query",
+        "ip",
+        "asn",
+        "asn_org",
+        "prefix",
+        "country",
+        "registry",
+        "status",
+        "source",
+        "detail",
+        "looked_up_at",
+        "expires_at",
+    )
+    date_hierarchy = "looked_up_at"
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False

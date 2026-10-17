@@ -25,6 +25,7 @@ from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
 from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework.generics import GenericAPIView
 from rest_framework.parsers import FormParser, MultiPartParser
@@ -65,6 +66,7 @@ from adminapi.exceptions import (
 )
 from adminapi.throttling import (
     AdminBulkThrottle,
+    AdminIntelThrottle,
     AdminCredentialDailyThrottle,
     AdminCredentialHourlyThrottle,
     AdminCSVUploadThrottle,
@@ -77,6 +79,7 @@ from adminapi.filters import (
     AdminAuditLogFilter,
     AdminChainFilter,
     AdminContentFilter,
+    AdminIpIntelFilter,
     AdminPlanFilter,
     AdminProxyFilter,
     AdminSubscriptionFilter,
@@ -92,6 +95,7 @@ from adminapi.serializers import (
     AdminAuditLogSerializer,
     AdminChainSerializer,
     AdminContentSerializer,
+    AdminIpIntelRecordSerializer,
     AdminMeSerializer,
     AdminPlanSerializer,
     AdminProxyDetailSerializer,
@@ -102,6 +106,8 @@ from adminapi.serializers import (
     AdminUserSerializer,
     BulkDeleteSerializer,
     BulkEnableSerializer,
+    IntelCandidateAnalysisSerializer,
+    IntelRefreshSerializer,
     ProbeRequestSerializer,
     ProxyCSVUploadSerializer,
     SetPasswordSerializer,
@@ -114,8 +120,19 @@ from billing.models import (
     UsageLog,
 )
 from core.models import Content
+from proxies.diversity import (
+    HopInput,
+    analyse_chain,
+    analyse_hops,
+)
 from proxies.health import record_probe_results
 from proxies.importers import CSVImportError, import_proxies_from_csv
+from proxies.intel import (
+    cached_facts,
+    get_ip_intel,
+    lookup_hosts,
+    normalise_host,
+)
 from proxies.probing import (
     DEFAULT_CONCURRENCY,
     DEFAULT_TIMEOUT,
@@ -126,6 +143,7 @@ from proxies.probing import (
 )
 from proxies.models import (
     ChainHop,
+    IpIntelRecord,
     Proxy,
     ProxyChain,
     ProxyProtocol,
@@ -1202,3 +1220,200 @@ class AdminChainViewSet(AdminReadOnlyViewSet):
             queryset=ChainHop.objects.select_related("proxy").order_by("position"),
         )
     )
+
+    @action(detail=True, methods=["get"], url_path="diversity")
+    def diversity(self, request, pk=None):
+        """`GET /api/admin/chains/{id}/diversity/` -- what this user's
+        chain actually buys them.
+
+        The same analysis the mobile client gets, with two differences.
+        Real vendor names are shown rather than "Vendor A": the operator
+        is the one who typed them in. And the chain is **not** resolved
+        first -- an admin read must not depend on the subscriber's
+        entitlement being currently valid, and constrained positions are
+        reported honestly as unresolved rather than filled in with
+        whatever the operator's own plan would pick.
+        """
+        chain = self.get_object()
+        report = analyse_chain(chain)
+        payload = report.as_dict()
+        payload["chain"] = {
+            "id": chain.pk,
+            "name": chain.name,
+            "user": chain.user_id,
+        }
+        payload["analysed_at"] = timezone.now()
+        return Response(payload)
+
+
+# ---------------------------------------------------------------------------
+# IP intelligence (R2)
+# ---------------------------------------------------------------------------
+
+
+class AdminIntelViewSet(AdminReadOnlyViewSet):
+    """Cached origin lookups, plus the two actions that create them.
+
+    `list` and `retrieve` are an ordinary admin read of the cache.
+    `candidates` and `refresh` reach the network, synchronously, against a
+    rate-limited third party -- so they carry their own throttle and their
+    own audit events rather than riding the generic admin budget.
+    """
+
+    serializer_class = AdminIpIntelRecordSerializer
+    filterset_class = AdminIpIntelFilter
+    search_fields = ("query", "asn_org", "prefix", "ip")
+    ordering_fields = ("query", "asn", "country", "looked_up_at", "expires_at", "id")
+    ordering = ("query",)
+    queryset = IpIntelRecord.objects.all()
+
+    def get_serializer_class(self):
+        if getattr(self, "action", None) == "candidates":
+            return IntelCandidateAnalysisSerializer
+        if getattr(self, "action", None) == "refresh":
+            return IntelRefreshSerializer
+        return AdminIpIntelRecordSerializer
+
+    def get_throttles(self):
+        if getattr(self, "action", None) in ("candidates", "refresh"):
+            return [AdminIntelThrottle()]
+        return super().get_throttles()
+
+    @action(detail=False, methods=["post"], url_path="candidates")
+    def candidates(self, request):
+        """`POST /api/admin/intel/candidates/` -- three vendors, or one?
+
+        The question this whole feature was asked for: paste in candidate
+        endpoints from several sellers and find out whether they actually
+        represent different operators **before** paying for a year of all
+        three. The proxy market is consolidated and resellers routinely
+        front the same upstream network, so "three vendors" and "three
+        operators" are different claims and only one of them is checkable.
+
+        The hosts deliberately **need not exist in the inventory**. Nothing
+        is written to `Proxy`; the only rows created are cache entries in
+        `IpIntelRecord`, which are facts about addresses rather than
+        inventory the operator has committed to.
+
+        Synchronous for the same reason the probe endpoint is, and capped
+        harder: `IP_INTEL_API_MAX_HOSTS` candidates, a per-lookup timeout,
+        serial lookups under the configured rate limit.
+        """
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        candidates = serializer.validated_data["candidates"]
+        force = serializer.validated_data["refresh"]
+
+        hosts = [candidate["host"] for candidate in candidates]
+        batch = lookup_hosts(hosts, intel=get_ip_intel(), force=force)
+
+        entries = [
+            HopInput(
+                position=index,
+                host=candidate["host"],
+                provider=candidate.get("provider") or "",
+                country=candidate.get("country") or "",
+                label=candidate.get("label") or "",
+            )
+            for index, candidate in enumerate(candidates)
+        ]
+        # Re-read through the cache rather than using the batch's records
+        # directly, so a host that was already cached and one that was
+        # just looked up are joined by exactly the same code path.
+        report = analyse_hops(entries, records=cached_facts(hosts))
+
+        audit(
+            "admin_intel_candidates",
+            request=request,
+            candidates=len(candidates),
+            hosts=hosts,
+            looked_up=len(batch.looked_up),
+            from_cache=len(batch.from_cache),
+            failed=len(batch.failed),
+            score=round(report.score, 1),
+            worst_severity=report.worst_severity,
+            finding_codes=[finding.code for finding in report.findings],
+            forced=force,
+        )
+
+        payload = report.as_dict()
+        payload["analysed_at"] = timezone.now()
+        payload["lookups"] = {
+            "requested": len(hosts),
+            "looked_up": batch.looked_up,
+            "from_cache": batch.from_cache,
+            "failed": batch.failed,
+            # Set when the source cannot be used at all -- no resolver
+            # configured, say. Distinct from per-host failure: it means
+            # nothing was checked, not that these hosts are unusual.
+            "unavailable": batch.unavailable or None,
+        }
+        return Response(payload)
+
+    @action(detail=False, methods=["post"], url_path="refresh")
+    def refresh(self, request):
+        """`POST /api/admin/intel/refresh/` -- look these up now.
+
+        `{ids: [...]}` for inventory rows, `{hosts: [...]}` for anything
+        else, `force: true` to ignore a still-fresh cache entry. The
+        normal path is the scheduled `refresh_ip_intel` command; this is
+        the button beside a filtered table.
+        """
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        ids = serializer.validated_data.get("ids") or []
+        hosts = list(serializer.validated_data.get("hosts") or [])
+        force = serializer.validated_data["force"]
+
+        found_ids = []
+        if ids:
+            rows = Proxy.objects.filter(pk__in=ids).values_list("pk", "host")
+            for pk, host in rows:
+                found_ids.append(pk)
+                hosts.append(host)
+
+        unique_hosts = list(dict.fromkeys(normalise_host(host) for host in hosts))
+        cap = int(getattr(settings, "IP_INTEL_API_MAX_HOSTS", 25))
+        if len(unique_hosts) > cap:
+            # The ids cap is MAX_IDS, but a thousand proxies can be a
+            # thousand distinct hosts and this runs in a request worker.
+            # Refusing is better than a request that times out halfway
+            # through and leaves the operator guessing what was written.
+            raise ValidationError(
+                {
+                    "ids": (
+                        f"That selection resolves to {len(unique_hosts)} "
+                        f"distinct hosts; at most {cap} can be refreshed "
+                        f"per request. Use the `refresh_ip_intel` "
+                        f"management command for a bulk refresh."
+                    )
+                }
+            )
+
+        batch = lookup_hosts(unique_hosts, intel=get_ip_intel(), force=force)
+
+        audit(
+            "admin_intel_refresh",
+            request=request,
+            proxy_ids=found_ids,
+            requested_hosts=len(unique_hosts),
+            looked_up=len(batch.looked_up),
+            from_cache=len(batch.from_cache),
+            failed=len(batch.failed),
+            forced=force,
+        )
+
+        records = [
+            batch.records[key] for key in unique_hosts if key in batch.records
+        ]
+        return Response(
+            {
+                "requested": len(unique_hosts),
+                "looked_up": batch.looked_up,
+                "from_cache": batch.from_cache,
+                "failed": batch.failed,
+                "unavailable": batch.unavailable or None,
+                "not_found": sorted(set(ids) - set(found_ids)),
+                "records": AdminIpIntelRecordSerializer(records, many=True).data,
+            }
+        )

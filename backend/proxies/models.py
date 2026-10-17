@@ -1,5 +1,7 @@
 """Proxy inventory, bulk-upload batches, and user-saved proxy chains."""
 
+import re
+
 from django.conf import settings
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
@@ -114,6 +116,26 @@ class Proxy(TimeStampedModel):
     )
     country = models.CharField(max_length=64, blank=True, db_index=True)
     city = models.CharField(max_length=64, blank=True)
+    # Who the operator actually paid. NOT derivable from the ASN, and the
+    # whole reason this column exists: an ASN says which *network* an
+    # address sits on, and a reseller fronting someone else's network is
+    # invisible to it. Two proxies on two ASNs bought from one vendor are
+    # still one commercial relationship, one account that can be closed and
+    # one entity that can be subpoenaed -- so `proxies.diversity` treats a
+    # shared provider as correlation in its own right.
+    #
+    # Free text rather than a lookup table on purpose: the operator buys
+    # from whoever they buy from, the set changes, and a foreign key would
+    # mean a migration every time a vendor is tried for a month. Compared
+    # case-insensitively after trimming -- see `provider_key`.
+    provider = models.CharField(
+        max_length=100,
+        blank=True,
+        db_index=True,
+        help_text="The vendor this endpoint was bought from, as the "
+        "operator thinks of it. Blank means unrecorded -- which the "
+        "diversity analysis reports as unknown, never as 'different'.",
+    )
     tier = models.CharField(
         max_length=20,
         choices=ProxyTier.choices,
@@ -221,6 +243,186 @@ class Proxy(TimeStampedModel):
     def is_probed(self):
         """Whether any probe has been recorded inside the rolling window."""
         return self.probe_count > 0
+
+    @property
+    def provider_key(self):
+        """Normalised provider, for comparison. `""` when unrecorded."""
+        return provider_key(self.provider)
+
+
+#: Any run of characters that is not a letter or a digit.
+_ENTITY_SEPARATORS = re.compile(r"[^0-9a-z]+")
+
+
+def entity_key(value):
+    """Normalised company name, for comparing two of them.
+
+    Case, punctuation and whitespace are all collapsed, so `"Webshare "`,
+    `"webshare"`, `"WEBSHARE"` and `"Web-Share"` are one vendor, and the
+    registry's `"GLOBAL-TRANSIT-LLC"` matches another registry's
+    `"Global Transit LLC"`.
+
+    Punctuation is deliberately included. Regional registries use hyphens
+    where a human would use spaces, so two AS numbers belonging to one
+    company routinely differ only by punctuation -- and a comparison that
+    missed that would report two networks as independent *precisely* in
+    the case this feature exists to catch: one operator selling under
+    more than one name.
+
+    **This is string matching and it is a heuristic in both directions.**
+    Two unrelated companies can normalise to the same name, and one
+    company can appear under two genuinely different names that nothing
+    here will connect. The findings that use it name both AS numbers and
+    the matched text so an operator can check rather than take it on
+    trust, and the ASN comparison -- which is exact -- runs first.
+    """
+    return _ENTITY_SEPARATORS.sub(" ", (value or "").casefold()).strip()
+
+
+#: Vendor names and AS operator names are normalised the same way; the
+#: alias exists so each call site reads as what it is comparing.
+provider_key = entity_key
+
+
+class IpIntelStatus(models.TextChoices):
+    """Outcome of one IP-intelligence lookup.
+
+    A closed set, and the distinction between the three values is the
+    point. `NOT_FOUND` means the source answered and has no origin for
+    this address -- a private range, a bogon, an address nobody announces.
+    `ERROR` means we did not get an answer. Both leave the hop unknown to
+    the diversity analysis, but only one of them is worth retrying soon,
+    and only one of them says anything about the address.
+    """
+
+    OK = "ok", "Origin resolved"
+    NOT_FOUND = "not_found", "Source has no origin for this address"
+    ERROR = "error", "Lookup failed"
+
+
+class IpIntelRecord(models.Model):
+    """Cached answer to "what network is this host on, and whose is it".
+
+    Keyed by the **host string as stored on `Proxy.host`**, not by resolved
+    address. Two reasons:
+
+    * A provider sells hundreds of endpoints behind one hostname. Keying by
+      host means one lookup serves all of them, which is the difference
+      between a few queries and a few hundred against a free service that
+      owes us nothing.
+    * The thing an operator reasons about is the row in their inventory. If
+      a hostname starts resolving somewhere else, the honest result is a
+      stale record that expires, not a silent re-key.
+
+    There is no foreign key to `Proxy`. A record describes an address, not
+    an inventory row: the candidate-evaluation endpoint looks up hosts that
+    are deliberately **not** in the inventory, and an FK would have forced
+    those to be written as proxies first -- creating rows for vendors the
+    operator has not bought from yet.
+
+    Rows are replaced in place on refresh rather than appended like
+    `ProxyProbe`. Probe history is evidence about a changing thing; an ASN
+    assignment is a near-static fact, and keeping every observation of it
+    would be a table of identical rows.
+    """
+
+    query = models.CharField(
+        max_length=255,
+        unique=True,
+        help_text="The host as stored on the proxy, lower-cased. May be a "
+        "hostname or a literal address.",
+    )
+    ip = models.GenericIPAddressField(
+        null=True,
+        blank=True,
+        help_text="The address the lookup actually examined. Differs from "
+        "`query` when the host is a name, and is null when the name did "
+        "not resolve.",
+    )
+    asn = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Origin AS number. Null means unknown -- which is never "
+        "treated as 'diverse'.",
+    )
+    asn_org = models.CharField(
+        max_length=200,
+        blank=True,
+        help_text="The AS name/organisation as the registry publishes it.",
+    )
+    prefix = models.CharField(
+        max_length=64,
+        blank=True,
+        db_index=True,
+        help_text="Announced CIDR the address falls in, e.g. 8.8.8.0/24. "
+        "Two hops inside one prefix are very likely the same rack.",
+    )
+    country = models.CharField(max_length=8, blank=True, db_index=True)
+    registry = models.CharField(
+        max_length=32,
+        blank=True,
+        help_text="arin / ripencc / apnic / lacnic / afrinic, where the "
+        "source reports it.",
+    )
+    status = models.CharField(
+        max_length=16,
+        choices=IpIntelStatus.choices,
+        default=IpIntelStatus.OK,
+        db_index=True,
+    )
+    source = models.CharField(
+        max_length=64,
+        blank=True,
+        help_text="Which IpIntel implementation produced this row. Recorded "
+        "because the sources disagree about prefix granularity and about "
+        "which org a reseller belongs to, and a mixed cache that cannot say "
+        "where a value came from cannot be reconciled.",
+    )
+    detail = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Error prose on a failed lookup. Empty on success.",
+    )
+    looked_up_at = models.DateTimeField(db_index=True)
+    expires_at = models.DateTimeField(
+        db_index=True,
+        help_text="When this row stops being trusted. Written at lookup "
+        "time from the TTL settings, so changing a TTL affects new lookups "
+        "and leaves existing rows to age out on the terms they were "
+        "fetched under.",
+    )
+
+    class Meta:
+        verbose_name = "IP intel record"
+        verbose_name_plural = "IP intel records"
+        ordering = ("query",)
+        indexes = [
+            # "What needs refreshing" -- the management command's hot path.
+            models.Index(fields=["expires_at"], name="intel_expiry_idx"),
+            # "Which hosts share this ASN" -- the operator's question after
+            # the analysis names one.
+            models.Index(fields=["asn", "query"], name="intel_asn_idx"),
+        ]
+
+    def __str__(self):
+        if self.asn:
+            return f"{self.query} -> AS{self.asn} ({self.asn_org or '?'})"
+        return f"{self.query} -> {self.get_status_display()}"
+
+    def is_fresh(self, now=None):
+        now = now or timezone.now()
+        return self.expires_at > now
+
+    @property
+    def is_known(self):
+        """Whether this row carries an actual origin.
+
+        A row can exist, be fresh, and still know nothing -- that is what
+        `NOT_FOUND` and `ERROR` are for. Callers must branch on this and
+        not on the row's existence.
+        """
+        return self.status == IpIntelStatus.OK and self.asn is not None
 
 
 class ProbeErrorKind(models.TextChoices):

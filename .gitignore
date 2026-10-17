@@ -64,3 +64,7 @@ app/screen.png
 # Playwright MCP session artifacts
 .playwright-mcp/
 admin/.playwright-mcp/
+
+# Local credentials - NEVER commit
+ACCESS.md
+**/ACCESS.md

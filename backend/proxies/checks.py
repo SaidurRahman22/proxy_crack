@@ -99,3 +99,91 @@ def check_health_thresholds(app_configs, **kwargs):
         )
 
     return problems
+
+
+@register(Tags.compatibility)
+def check_ip_intel_settings(app_configs, **kwargs):
+    """Configurations that would make the diversity feature lie or misbehave.
+
+    None of these stop the service: a chain with no intel is reported as
+    unknown rather than as diverse, which is the whole design. They are
+    warnings because the failure mode is a quieter one -- an operator who
+    believes the feature is running when it cannot run at all.
+    """
+    from django.conf import settings
+
+    problems = []
+
+    ttl_days = float(getattr(settings, "IP_INTEL_TTL_DAYS", 30))
+    negative_hours = float(getattr(settings, "IP_INTEL_NEGATIVE_TTL_HOURS", 6))
+
+    if ttl_days <= 0:
+        problems.append(
+            Warning(
+                "IP_INTEL_TTL_DAYS is 0, so every cached lookup is stale the "
+                "moment it is written. Each analysis that can look things up "
+                "will re-query the upstream source for every hop, which is "
+                "slow for the operator and rude to a free service that may "
+                "block us for it.",
+                hint="An ASN assignment changes on the order of years. 30 "
+                "days is the default for a reason.",
+                id="proxies.W006",
+            )
+        )
+
+    if negative_hours / 24.0 >= ttl_days > 0:
+        problems.append(
+            Warning(
+                f"IP_INTEL_NEGATIVE_TTL_HOURS ({negative_hours}h) is not "
+                f"shorter than IP_INTEL_TTL_DAYS ({ttl_days}d). A failed "
+                f"lookup would then be cached as long as a successful one, "
+                f"so a single DNS outage pins those hosts to 'unknown' for "
+                f"the whole window -- and 'unknown' is the state the "
+                f"diversity analysis exists to get out of.",
+                hint="Keep the negative TTL in hours and the positive one "
+                "in days.",
+                id="proxies.W007",
+            )
+        )
+
+    return problems
+
+
+@register(Tags.compatibility, deploy=True)
+def check_ip_intel_has_a_resolver(app_configs, **kwargs):
+    """The DNS source needs a resolver, and on Windows there is no default.
+
+    `deploy=True` on purpose. On a development machine with no
+    `/etc/resolv.conf` this condition is permanent and harmless -- the
+    analysis reports every hop as unknown, which it is designed to do
+    honestly -- and a warning that every developer sees on every `check`
+    forever is a warning everybody learns to scroll past. In a deployment
+    the same condition means a feature that silently answers "unknown" to
+    every question, which is worth a line in `check --deploy`.
+    """
+    from django.conf import settings
+
+    backend = str(getattr(settings, "IP_INTEL_BACKEND", ""))
+    if not backend.endswith("CymruDnsIpIntel"):
+        return []
+
+    from proxies.intel import configured_resolvers
+
+    if configured_resolvers():
+        return []
+
+    return [
+        Warning(
+            "IP_INTEL_BACKEND is the DNS source but no resolver is "
+            "available: IP_INTEL_DNS_RESOLVERS is empty and there is no "
+            "/etc/resolv.conf to read. Every lookup will fail and every "
+            "hop will be reported as unknown -- correct behaviour, but it "
+            "means the diversity analysis can never confirm anything.",
+            hint="Set IP_INTEL_DNS_RESOLVERS to the resolver this host "
+            "should use. There is no public default on purpose: those "
+            "queries are a list of your proxy inventory, and handing it to "
+            "a third-party resolver would be the disclosure this product "
+            "exists to prevent.",
+            id="proxies.W008",
+        )
+    ]

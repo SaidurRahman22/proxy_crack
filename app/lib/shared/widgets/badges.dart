@@ -16,6 +16,10 @@ Color latencyColor(BuildContext context, LatencyGrade grade) {
     LatencyGrade.moderate => tokens.subtleForeground,
     LatencyGrade.slow => tokens.warning,
     LatencyGrade.dead => tokens.destructiveText,
+    // Never measured. Deliberately NOT green: an unprobed hop is not a fast
+    // hop, and colouring it like one would be the same mistake D20 refuses
+    // to make in the diversity ladder.
+    LatencyGrade.unknown => tokens.mutedForeground,
   };
 }
 
@@ -154,6 +158,10 @@ class AliveIndicator extends StatelessWidget {
 }
 
 /// Latency readout with a grade colour.
+///
+/// Prefers `latency_p95_ms` over `latency_ms`. A good mean with a terrible
+/// tail is a bad hop and the mean hides that — which is why R1 records the
+/// percentile and why this is the number the user sees.
 class LatencyLabel extends StatelessWidget {
   const LatencyLabel({super.key, required this.proxy});
 
@@ -162,11 +170,21 @@ class LatencyLabel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final color = latencyColor(context, proxy.latencyGrade);
-    final value = proxy.isAlive ? Format.latency(proxy.latencyMs) : '--';
+    final latency = proxy.effectiveLatencyMs;
+    final String value;
+    final String spoken;
+    if (!proxy.isAlive) {
+      value = '--';
+      spoken = 'Latency unknown, host offline';
+    } else if (latency == null) {
+      value = 'n/a';
+      spoken = 'Never probed, latency unknown';
+    } else {
+      value = Format.latency(latency);
+      spoken = 'Latency $latency milliseconds';
+    }
     return Semantics(
-      label: proxy.isAlive
-          ? 'Latency ${proxy.latencyMs} milliseconds'
-          : 'Latency unknown, host offline',
+      label: spoken,
       excludeSemantics: true,
       child: Text(
         value,
@@ -174,6 +192,52 @@ class LatencyLabel extends StatelessWidget {
           color: color,
           fontFeatures: const <FontFeature>[FontFeature.tabularFigures()],
         ),
+      ),
+    );
+  }
+}
+
+/// Reliability readout: `success_rate` over `probe_count` probes.
+///
+/// An **unprobed** proxy reads "not probed", never "0%". The two are
+/// completely different claims — one is a proxy that drops every connection,
+/// the other is a proxy nobody has asked yet (D15, P15) — and conflating
+/// them in the UI would undo the distinction R1 exists to draw.
+class HealthBadge extends StatelessWidget {
+  const HealthBadge({super.key, required this.proxy, this.dense = true});
+
+  final Proxy proxy;
+  final bool dense;
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = context.tokens;
+    if (proxy.isUnprobed) {
+      return Semantics(
+        label: 'Never probed. Reliability unknown.',
+        excludeSemantics: true,
+        child: TagChip(
+          label: 'NOT PROBED',
+          icon: Icons.help_outline,
+          color: tokens.mutedForeground,
+          dense: dense,
+        ),
+      );
+    }
+    final percent = proxy.successPercent ?? 0;
+    final color = percent >= 95
+        ? tokens.accent
+        : percent >= 80
+            ? tokens.subtleForeground
+            : tokens.warning;
+    return Semantics(
+      label: '$percent percent of ${proxy.probeCount} probes succeeded',
+      excludeSemantics: true,
+      child: TagChip(
+        label: '$percent% · ${proxy.probeCount}',
+        icon: Icons.insights_outlined,
+        color: color,
+        dense: dense,
       ),
     );
   }

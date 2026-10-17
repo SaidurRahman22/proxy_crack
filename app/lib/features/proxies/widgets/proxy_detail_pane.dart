@@ -79,17 +79,52 @@ class ProxyDetailPane extends StatelessWidget {
                 _DetailRow(label: 'Protocol', value: p.protocol.label),
                 const Divider(height: AppSpacing.lg),
                 _DetailRow(
-                  label: 'Single-hop latency',
-                  value: p.isAlive ? Format.latency(p.latencyMs) : 'unknown',
+                  label: 'Latency p95',
+                  value: p.latencyP95Ms == null
+                      ? (p.isUnprobed ? 'not probed' : 'unknown')
+                      : Format.latency(p.latencyP95Ms!),
                   valueColor: latencyColor(context, p.latencyGrade),
+                ),
+                const Divider(height: AppSpacing.lg),
+                _DetailRow(
+                  label: 'Latency p50',
+                  value: p.latencyP50Ms == null
+                      ? '--'
+                      : Format.latency(p.latencyP50Ms!),
+                ),
+                const Divider(height: AppSpacing.lg),
+                // "not probed" and "0%" are different claims and must read
+                // differently: one proxy has never been asked, the other
+                // drops every connection (D15 / P15).
+                _DetailRow(
+                  label: 'Success rate',
+                  value: p.isUnprobed
+                      ? 'not probed'
+                      : '${p.successPercent}% over ${p.probeCount} probes',
+                ),
+                const Divider(height: AppSpacing.lg),
+                _DetailRow(
+                  label: 'Quality score',
+                  value: p.isUnprobed
+                      ? '${p.qualityScore.round()} (unmeasured default)'
+                      : '${p.qualityScore.round()} of 100',
                 ),
                 const Divider(height: AppSpacing.lg),
                 _DetailRow(label: 'Tier', value: p.tier.label),
                 const Divider(height: AppSpacing.lg),
                 _DetailRow(
                   label: 'Last health check',
-                  value: Format.relativeTime(p.lastChecked),
+                  value: p.probeCount == 0
+                      ? 'never'
+                      : Format.relativeTime(p.lastChecked),
                 ),
+                if (!p.protocol.carriesUdp) ...<Widget>[
+                  const Divider(height: AppSpacing.lg),
+                  // An HTTP proxy is TCP-only, so any chain containing one
+                  // is too — no QUIC, no WebRTC, no VoIP, most games
+                  // broken. Worth saying before a hop is added, not after.
+                  _DetailRow(label: 'UDP', value: 'not carried (TCP only)'),
+                ],
               ],
             ),
           ),

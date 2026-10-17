@@ -89,6 +89,32 @@ class Subscription {
         status: SubscriptionStatus.active,
       );
 
+  /// The free tier, which has **no `Subscription` row on the server**.
+  ///
+  /// `GET /api/subscription/` returns `"subscription": null` for a user with
+  /// no active purchase; the plan and the entitlements are still populated.
+  /// Rather than make every screen handle a null subscription, the free case
+  /// is materialised here once, with `hasSubscriptionRow = false` on the
+  /// snapshot recording that it was synthesised.
+  factory Subscription.synthesisedFree({
+    required Plan plan,
+    int bytesUsed = 0,
+    DateTime? startedAt,
+  }) {
+    final now = DateTime.now();
+    return Subscription(
+      id: 0,
+      userId: 0,
+      plan: plan,
+      startedAt: startedAt ?? now,
+      // Not a real expiry: the free tier does not end. Far enough out that
+      // `daysRemaining` never counts down to a deadline that does not exist.
+      expiresAt: now.add(const Duration(days: 3650)),
+      status: SubscriptionStatus.active,
+      bytesUsed: bytesUsed,
+    );
+  }
+
   Subscription copyWith({
     Plan? plan,
     SubscriptionStatus? status,
@@ -106,20 +132,41 @@ class Subscription {
         bytesUsed: bytesUsed ?? this.bytesUsed,
       );
 
-  factory Subscription.fromJson(Map<String, dynamic> json) => Subscription(
-        id: json['id'] as int,
-        userId: json['user_id'] as int? ?? 0,
-        plan: Plan.fromJson(json['plan'] as Map<String, dynamic>),
-        startedAt: DateTime.tryParse(json['started_at'] as String? ?? '') ??
-            DateTime.now(),
-        expiresAt: DateTime.tryParse(json['expires_at'] as String? ?? '') ??
-            DateTime.now(),
-        status: SubscriptionStatus.fromWire(
-          json['status'] as String? ?? 'expired',
-        ),
-        platformTxnId: json['platform_txn_id'] as String?,
-        bytesUsed: json['bytes_used'] as int? ?? 0,
-      );
+  /// Parses `SubscriptionSerializer`.
+  ///
+  /// The server's row carries `{id, plan, started_at, expires_at, status,
+  /// platform, auto_renewing}` — no `user_id` (it is the token's user by
+  /// construction) and no byte total (usage is aggregated into the
+  /// entitlement payload, not onto the subscription). Both are supplied by
+  /// the caller from the surrounding response.
+  factory Subscription.fromJson(
+    Map<String, dynamic> json, {
+    Plan? fallbackPlan,
+    int bytesUsed = 0,
+  }) {
+    final planJson = json['plan'] as Map<String, dynamic>?;
+    final plan = planJson != null ? Plan.fromJson(planJson) : fallbackPlan;
+    assert(
+      plan != null,
+      'A subscription needs a plan: pass fallbackPlan when the row omits it.',
+    );
+    return Subscription(
+      id: (json['id'] as num?)?.toInt() ?? 0,
+      userId: (json['user_id'] as num?)?.toInt() ?? 0,
+      plan: plan ?? fallbackPlan!,
+      startedAt:
+          DateTime.tryParse(json['started_at'] as String? ?? '') ??
+              DateTime.now(),
+      expiresAt:
+          DateTime.tryParse(json['expires_at'] as String? ?? '') ??
+              DateTime.now(),
+      status: SubscriptionStatus.fromWire(
+        json['status'] as String? ?? 'expired',
+      ),
+      platformTxnId: json['platform_txn_id'] as String?,
+      bytesUsed: (json['bytes_used'] as num?)?.toInt() ?? bytesUsed,
+    );
+  }
 
   Map<String, dynamic> toJson() => <String, dynamic>{
         'id': id,

@@ -65,7 +65,14 @@ Build:
 
 </details>
 
-### 2. Chain quality scoring — ASN and jurisdiction diversity 🔴 nobody does this well
+### 2. Chain quality scoring — ASN and jurisdiction diversity ✅ **BUILT 2026-10-17**
+
+Shipped. 15 finding codes, severity-ranked, score derived from findings. `unknown` deliberately
+ranks above `high` — a hop nobody checked is worse than a known problem — and a coverage ceiling
+makes that structural. Includes a candidate-analysis endpoint for vetting proxies before buying.
+
+<details>
+<summary>Original writeup</summary>
 
 A 3-hop chain where all three hops sit in the same datacenter, on the same ASN, under the same
 legal jurisdiction, provides **almost none** of the protection the user thinks they bought.
@@ -82,6 +89,8 @@ Build a score shown **before** connecting:
 
 This is the feature that makes the product *credible to people who know what chaining is for*,
 and it is pure data work — no engine changes.
+
+</details>
 
 ### 3. Kill switch and leak prevention 🔴 table stakes that proxychains fails
 
@@ -132,6 +141,43 @@ Per-hop latency breakdown (which hop is slow), live throughput, success rate ove
 history. When a chain is slow, proxychains gives you nothing; you should name the hop.
 
 ---
+
+## R9 — Provider sync (Webshare and friends) 🔴 not built, and the gap is bigger than it looks
+
+Today proxies enter the database **one at a time, by hand or by CSV**. Nothing talks to the
+provider. That has three consequences the operator will hit immediately:
+
+1. **You load a fraction of what you pay for.** A Webshare free plan is 10 IPs; one is loaded.
+2. **Rotation silently breaks the product.** Providers replace IPs. When Webshare swaps an
+   address, this database keeps the dead one and the health checker marks it dead — correct, but
+   the replacement never arrives. Inventory decays with no way back up.
+3. **Bandwidth is invisible.** The free plan is 1 GB. Nothing tracks consumption against the
+   provider's own meter, so the first sign of exhaustion is everything failing at once.
+
+### What to build
+
+- A `ProviderSync` abstraction — same pluggable shape as `Prober` and `IpIntel`, with a fake for
+  tests, because these all hit a third party we cannot reach from CI.
+- A **Webshare adapter**: `GET https://proxy.webshare.io/api/v2/proxy/list/` with
+  `Authorization: Token <key>`, paginated. Returns address, port, username, password, country
+  code and validity — i.e. everything `Proxy` needs, including the `country` that is blank today
+  (**P22**).
+- Store the provider API key **the same way proxy credentials are stored**: encrypted at rest,
+  never in a committed file, fail-loud if the key is missing. It is as sensitive as the proxies
+  it buys.
+- **Reconcile, do not blind-import.** A sync must add new endpoints, mark vanished ones
+  `is_enabled=False` rather than deleting them (deleting loses probe history and breaks saved
+  chains via `PROTECT`), and **never silently blank credentials** — the exact bug already fixed
+  once in the CSV importer. Reuse that rule.
+- Pull the provider's **bandwidth counter** where exposed, and surface it next to `UsageLog` so
+  the operator sees both their own accounting and the provider's.
+- Schedule it the same way as `probe_proxies`: a management command a timer calls. No queue.
+
+### Why it is also a credibility feature
+
+Sync records **which provider sold each endpoint**, which feeds `Proxy.provider` — and that is
+the field R2's operator-diversity check depends on. Without it an operator types vendor labels
+by hand and the diversity score is only as good as their typing.
 
 ## Quick wins
 

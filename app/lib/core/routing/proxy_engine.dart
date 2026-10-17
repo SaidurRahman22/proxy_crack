@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import '../../data/models/proxy_chain.dart';
+import '../../data/models/proxy_credentials.dart';
 
 /// Lifecycle of the tunnel.
 ///
@@ -260,10 +261,21 @@ abstract class ProxyEngine {
 
   /// Brings the tunnel up over [chain].
   ///
+  /// [credentials] carries one username/password (and Shadowsocks cipher)
+  /// per hop, fetched from each hop's `credentials_url` immediately before
+  /// this call — see D18. It is **not** part of [chain] on purpose: a chain
+  /// is a durable, serialisable, loggable object and credentials are none of
+  /// those things. An implementation must hand them to the engine and
+  /// forget them; it must never store, cache or log them, and must not keep
+  /// them on [status].
+  ///
+  /// Null is legal and means "connect without credentials" — the mock engine
+  /// ignores it entirely, and a hop whose proxy needs none has no entry.
+  ///
   /// Throws [EngineException] on failure; the same failure is also published
   /// on [statusStream] as an [EngineState.error] status so late subscribers
   /// see it.
-  Future<void> connect(ProxyChain chain);
+  Future<void> connect(ProxyChain chain, {ChainCredentials? credentials});
 
   /// Tears the tunnel down. Safe to call when already disconnected.
   Future<void> disconnect();

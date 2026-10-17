@@ -682,7 +682,7 @@ def _pair_findings(hops, entry_exit_reported):
                 severity=Severity.HIGH,
                 title="Hops share a network block",
                 message=(
-                    f"Hops {_join(positions)} are all inside {block}. "
+                    f"Hops {_join_hops(positions)} are all inside {block}. "
                     "Addresses that close together are very likely the same "
                     "rack, often the same machine -- treat them as one hop, "
                     "not several."
@@ -709,7 +709,7 @@ def _pair_findings(hops, entry_exit_reported):
                 severity=Severity.MEDIUM,
                 title="Hops share an ASN",
                 message=(
-                    f"Hops {_join(positions)} are all on AS{asn}"
+                    f"Hops {_join_hops(positions)} are all on AS{asn}"
                     f"{(' (' + org + ')') if org else ''}. One network "
                     "operator can see the traffic entering and leaving each "
                     "of them."
@@ -732,7 +732,7 @@ def _pair_findings(hops, entry_exit_reported):
                 severity=Severity.MEDIUM,
                 title="Hops are on different ASNs owned by one operator",
                 message=(
-                    f"Hops {_join(positions)} are on different AS numbers "
+                    f"Hops {_join_hops(positions)} are on different AS numbers "
                     f"({_join(sorted(asns), prefix='AS')}) that are all "
                     f"registered to {group[0].asn_org}. Separate networks, "
                     "one company."
@@ -758,7 +758,7 @@ def _pair_findings(hops, entry_exit_reported):
                 severity=Severity.MEDIUM,
                 title="Hops were bought from the same vendor",
                 message=(
-                    f"Hops {_join(positions)} were all bought from "
+                    f"Hops {_join_hops(positions)} were all bought from "
                     f"{group[0].provider}"
                     + (
                         f", on {len(asns)} different networks"
@@ -943,6 +943,21 @@ def _join(values, prefix=""):
     if len(values) == 1:
         return values[0]
     return ", ".join(values[:-1]) + " and " + values[-1]
+
+
+def _join_hops(positions):
+    """Format hop positions for a human, counting from 1.
+
+    `positions` is 0-based everywhere else -- in the payload, in the
+    resolver, in the chain model -- and stays that way, because clients
+    index with it. Only the prose is 1-based, because the UI labels the
+    first hop "Hop 1" and a message reading "Hops 0, 1 and 2" under a
+    header reading "Hops 1, 2 and 3" makes one card contradict itself.
+
+    Not folded into `_join`, which also formats AS numbers, where adding
+    one would be nonsense.
+    """
+    return _join([position + 1 for position in positions])
 
 
 # ---------------------------------------------------------------------------

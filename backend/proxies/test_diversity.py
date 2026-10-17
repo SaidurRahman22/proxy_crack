@@ -585,6 +585,38 @@ class ShapeTests(TestCase):
             ["entry_exit_shared_asn", "entry_exit_shared_provider"],
         )
 
+    def test_messages_number_hops_from_one_while_positions_stay_zero_based(self):
+        """Prose counts from 1; the payload counts from 0.
+
+        Found in the running app: a card's header read "Hops 1, 2 and 3"
+        (the client labels the first hop "Hop 1") while the server's own
+        message underneath read "Hops 0, 1 and 2" -- one card contradicting
+        itself. `positions` must stay 0-based because clients index with
+        it, so only the prose changed.
+        """
+        write_intel("10.0.0.1", asn=64500, org="A", prefix="10.0.0.0/24", country="NL")
+        write_intel("172.16.0.1", asn=64501, org="B", prefix="172.16.0.0/24", country="BR")
+        write_intel("192.0.2.1", asn=64502, org="C", prefix="192.0.2.0/24", country="JP")
+
+        report = analyse_hops(
+            hops(
+                ("10.0.0.1", "One Vendor", "NL"),
+                ("172.16.0.1", "One Vendor", "BR"),
+                ("192.0.2.1", "One Vendor", "JP"),
+            )
+        )
+
+        item = finding(report, "shared_provider")
+        self.assertEqual(list(item.positions), [0, 1, 2], "payload stays 0-based")
+        self.assertIn("Hops 1, 2 and 3", item.message)
+
+        # No emitted message may number a hop from zero.
+        for other in report.findings:
+            self.assertNotIn(
+                "Hops 0", other.message or "", f"{other.code} numbers from zero"
+            )
+            self.assertNotIn("Hop 0 ", other.message or "", other.code)
+
 
 class ScoringTests(TestCase):
     def test_score_is_derived_from_findings_and_cannot_disagree_with_them(self):

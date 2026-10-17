@@ -385,7 +385,39 @@ today **is** audited, so the two endpoints now differ on that axis.
 `ACCESS.md` at the repo root. **Gitignored** (`.gitignore` matches `ACCESS.md` and `**/ACCESS.md`;
 verified with `git check-ignore`). Never commit it, never paste it into chat.
 
-### 🔴🔴 P25 — WEBSHARE BLOCKS PROXY-TO-PROXY CONNECT. Multi-hop cannot work on this inventory.
+### ⚠️ P25 — CORRECTED 2026-10-17: Webshare blocks its OWN IP ranges, not chaining
+
+**The first conclusion below was too pessimistic and is superseded.** A follow-up test separated
+the two hypotheses:
+
+```
+Through a Webshare hop:
+  1.1.1.1:8080   (proxy port, neutral IP)   -> HTTP/1.0 200 OK   <- proxy ports are FINE
+  1.1.1.1:1080 / :3128                      -> TimeoutError      <- target not listening, NOT a block
+  <webshare IP>:443                         -> 403 Forbidden
+  <webshare IP>:80                          -> 403 Forbidden
+  <webshare IP>:<its proxy port>            -> 403 Forbidden
+```
+
+**Any** Webshare address is refused on **any** port; a non-Webshare address on a classic proxy
+port is allowed. So the rule is *"do not connect back into our own network"* — ordinary
+self-protection — **not** "no chaining".
+
+**What this means**
+- ✅ **Chaining works**, as long as consecutive hops are not both Webshare
+- ❌ Webshare → Webshare is impossible, and all 10 current proxies are Webshare
+- ➡️ **A second provider unblocks multi-hop.** This was already the plan for operator diversity
+  (R2 flags `entry_exit_shared_provider` as critical on a single-vendor chain), so the fix for
+  the technical blocker and the fix for the credibility problem are the same purchase.
+
+**Still test before buying:** take one endpoint from each candidate provider and attempt CONNECT
+from one to the other, both directions. Ten minutes, and it is the check that decides whether a
+provider can be hop 2.
+
+<details>
+<summary>Original, over-pessimistic P25 writeup (superseded — kept for the reasoning)</summary>
+
+### WEBSHARE BLOCKS PROXY-TO-PROXY CONNECT. Multi-hop cannot work on this inventory.
 
 **Confirmed independently, twice — from the device and from the host.** Through one Webshare
 hop:
@@ -417,6 +449,8 @@ credentials. This says the feature does not function.
 
 **Test this before paying any provider**: buy one endpoint from each candidate and attempt
 CONNECT from one to another. It is a ten-minute check that decides whether the product works.
+
+</details>
 
 ### Positions taken
 

@@ -153,23 +153,45 @@ flutter run            # needs the emulator: desktop shortcut "Android Emulator"
 
 ## Next steps, in order
 
-1. ~~Push to GitHub~~ ✅ done — `origin/main` tracking, working tree clean
-2. ~~R2 — diversity scoring~~ ✅ **DONE.** Detects when "three vendors" are one operator.
-   Headline: `POST /api/admin/intel/candidates/` analyses hosts **not in inventory** — vet
-   candidate proxies *before* buying. ⚠️ Needs `IP_INTEL_DNS_RESOLVERS` set to do anything.
-3. **Wire the Flutter app to the real API.** ⬅️ agreed next, after R2.
-   The mobile app currently has **no HTTP client at all** — it is a UI shell over
-   `lib/data/mock/` with a `MockProxyEngine`. That was deliberate (built while the engine
-   licence question was open) but it means the app cannot see real data. Needs:
-   - typed API client in Dart against `/api/`
-   - auth: login, JWT in memory, refresh-on-401, secure refresh-token storage
-   - a real repository replacing `catalog_repository`'s mock, **behind the same interface**
-     so no screen changes
-   - loading / empty / error states wired to real failures
-   Sequenced after R2 deliberately, because R2 adds a chain-diversity endpoint the chain
-   builder should consume — wiring first would mean doing it twice.
-4. **Phase 3 — the VPN engine.** The real risk. Everything before it is conventional work.
-   Resolve **P5 (Wintun)** in parallel since it has an external lead time.
+1. ~~Push to GitHub~~ ✅ · 2. ~~R2 diversity scoring~~ ✅ · 3. ~~Wire Flutter to the real API~~ ✅
+4. ~~R9 Webshare sync~~ ✅ · 5. ~~P16/P17~~ ✅ · 6. ~~Phase 3 — the VPN engine~~ ✅ **single-hop
+traffic proven on device**
+
+### 🔴 NOW — the off-switch, and not losing the device
+
+Triggered by a real incident: the operator connected a 2-hop chain, Webshare blocked hop→hop,
+fail-closed correctly held the TUN up — **and the emulator lost all connectivity with no way out
+from inside the app.** It took `adb shell am force-stop` to recover.
+
+That is the worst failure a VPN app can have: an off switch its own tunnel can block.
+
+| # | Fix | Why |
+|---|---|---|
+| **S1** | **Disconnect must never touch the network** | Tear the TUN down locally and unconditionally, first. Close the fd even if the engine will not stop — a leaked engine process is a smaller problem than a bricked device. |
+| **S2** | **Pre-flight before committing the TUN** | `testXray` validates the config without starting it; probe hop 2 *through* hop 1 **before** the default route moves. Catches P25 before connectivity is lost, and names the cause. |
+| **S3** | **Exempt our own API traffic** via `registerProcessFinder` + a `process` rule | Today our API calls go through the chain, so a broken chain means the client cannot re-fetch credentials to fix itself. A `direct` host rule was rejected: it would leak to the ISP that the user runs this product. |
+
+### 🟠 THEN — admin panel
+
+The React console at `localhost:5173` works; Django's at `:8000/admin/` caused confusion.
+**Decide: delete Django admin, or keep it as a superuser fallback and make the two impossible to
+confuse.** Also **P24** — admin logout writes no audit row (a P9 regression).
+
+### 🟡 THEN — make chaining actually work
+
+**Buy one endpoint from a second provider and test CONNECT in both directions** before
+subscribing. Ten minutes, and it decides whether multi-hop is possible with that vendor.
+Prefer **SOCKS5 or Shadowsocks**: they carry UDP, which lifts chains out of TCP-only (P7), and
+the observed block was on HTTP CONNECT specifically.
+
+The same purchase fixes two problems at once — R2 currently flags `entry_exit_shared_provider`
+as **critical** on any chain from this single-vendor pool.
+
+### ⚪ BACKLOG
+
+Phase 4 (mid-session failover, always-on/lockdown, proving the fail-closed watchdog fires),
+then P19-P23 (`credentials_url` echoes the Host header; `error.detail` has three shapes;
+`Plan.price` is a decimal string inviting float rounding on money).
 
 ### Proxy inventory reality check
 The dev DB holds **one** real proxy (Webshare, HTTP, premium), added by hand.

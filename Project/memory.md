@@ -42,7 +42,21 @@ content, and bulk proxy-list upload.
 | D5 | 2026-10-15 | Toolchains live in `D:\dev\` | No spaces in path — avoids Gradle/CocoaPods failures | yes |
 | D6 | 2026-10-15 | Monorepo: `app/` `backend/` `Project/` `Pre-Flight/` | Three components, one history | yes |
 | ~~D7~~ | 2026-10-15 | ~~Admin panel stays minimal — stock Django Admin only~~ | **SUPERSEDED by D12 the same day.** Operator saw the stock admin and rejected it on looks. | — |
-| D12 | 2026-10-15 | **Custom React SPA admin replaces Django Admin.** Vite + React + TypeScript in `admin/`, consuming a new staff-only API at `/api/admin/`. | Stock Django Admin looks dated and the operator wants the panel to match the product. Django Admin stays mounted at `/admin/` as a superuser fallback, not deleted. | moderate — ongoing maintenance cost |
+| D12 | 2026-10-15 | **Custom React SPA admin replaces Django Admin.** Vite + React + TypeScript in `admin/`, consuming a new staff-only API at `/api/admin/`. | Stock Django Admin looks dated and the operator wants the panel to match the product. ~~Django Admin stays mounted at `/admin/` as a superuser fallback~~ — **reversed by D26.** | moderate — ongoing maintenance cost |
+| **D26** | 2026-10-17 | **Django admin DELETED entirely.** `/admin/` 404s; `django.contrib.admin` removed. The React console is the only admin surface. | Operator decision — they kept landing on it by URL and do not want it to exist. There is also a security argument: Django admin authenticates with **session cookies** while everything else is token-based, and `CORS_ALLOW_CREDENTIALS=False` was set specifically because of it. Removing it removes that class of concern. **Cost accepted:** no UI fallback when the admin API or the SPA is broken — recovery is `manage.py shell`. | **reversible at the config level** — see below |
+
+> **Correction to my own note above.** I first recorded this as "hard to reverse once migrations
+> drop `LogEntry`". That is wrong, and deliberately so by the implementation. The migration also
+> clears the three `admin` rows from `django_migrations`, precisely so that re-adding
+> `django.contrib.admin` later re-runs the admin's own migrations and rebuilds its tables.
+>
+> Leaving those rows behind would have been the real trap: the loader would believe the tables
+> existed, create nothing, and the admin would die at first use with
+> `no such table: django_admin_log` — months later, with no obvious cause.
+>
+> The migration also **refuses to run if `django_admin_log` holds any rows** rather than trusting
+> that it was empty today. It was empty (0 rows) when applied. Destroying administrative history
+> to tidy a schema is a bad trade at any count above zero.
 
 ### D12 consequences
 

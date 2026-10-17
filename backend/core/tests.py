@@ -208,3 +208,45 @@ class KeyRotationTests(TestCase):
             before = raw_credentials(proxy.pk)
             call_command("rotate_proxy_credentials", "--dry-run", verbosity=0)
             self.assertEqual(raw_credentials(proxy.pk), before)
+
+
+class EncryptedFieldFormTests(TestCase):
+    """`EncryptedCharField.formfield()`, which nothing else exercises now.
+
+    Until Django Admin was removed, this override was covered only
+    incidentally, by an admin change-form round-trip in `api/tests.py`.
+    The override itself is a property of the field rather than of any
+    console -- any `ModelForm`, and django-filter's generated filter
+    forms, build their widgets through it -- so losing the console must
+    not lose the assertion.
+
+    What it guarantees: a form limits the **plaintext** a user may type,
+    not the width of the Fernet token that plaintext turns into. Without
+    the override the form would advertise the ciphertext width (~440 for a
+    255-character field), letting someone enter a value that passes form
+    validation and then fails the model's own stricter validator.
+    """
+
+    def field(self):
+        return Proxy._meta.get_field("password")
+
+    def test_formfield_advertises_the_plaintext_limit(self):
+        field = self.field()
+        self.assertEqual(field.formfield().max_length, 255)
+
+    def test_the_column_is_still_sized_for_the_ciphertext(self):
+        """The two limits genuinely differ -- otherwise the override above
+        would be asserting nothing."""
+        field = self.field()
+        self.assertEqual(field.max_length, encrypted_max_length(255))
+        self.assertGreater(field.max_length, field.formfield().max_length)
+
+    def test_an_explicit_max_length_still_wins(self):
+        """`formfield(max_length=...)` from a caller overrides the default,
+        which is what makes this a default rather than a cap."""
+        self.assertEqual(self.field().formfield(max_length=16).max_length, 16)
+
+    def test_the_rendered_widget_carries_the_plaintext_limit(self):
+        """The browser is told the plaintext limit, not the token width."""
+        rendered = self.field().formfield().widget.render("password", "")
+        self.assertIn('maxlength="255"', rendered)

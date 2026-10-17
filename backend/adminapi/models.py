@@ -109,6 +109,12 @@ class AuditAction(models.TextChoices):
     # Authentication.
     LOGIN = "admin_login", "Login succeeded"
     LOGIN_FAILED = "admin_login_failed", "Login failed"
+    # Console sign-out (P24). Login and login-failure were rows from the
+    # start; the end of the session was not, so "when did this staff
+    # account last end a session, and from where" had no answer on the
+    # one surface that holds the credentials. Prefixed `admin_` because
+    # it is the console surface, beside `admin_login`.
+    LOGOUT_ADMIN = "admin_logout", "Logout (console)"
     # Mobile sign-out (P17). Unprefixed like `credential_access`, because
     # the `admin_` prefix marks the console surface and this is the
     # mobile one. The row is what answers "when did this account last end

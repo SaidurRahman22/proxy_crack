@@ -31,6 +31,7 @@ from datetime import timedelta
 from io import StringIO
 
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import connection, transaction
@@ -471,6 +472,16 @@ class AuditedEndpointCoverageTests(TestCase):
     """
 
     def setUp(self):
+        # Throttle counters live in the process-wide default cache, which
+        # `TestCase`'s transaction rollback does not touch. Every test in
+        # this class signs in, and `admin_login` is a per-minute budget, so
+        # without this the class passes or fails on how many *other* tests
+        # signed in just before it -- a dependency on execution order that
+        # has nothing to do with what is being tested. (Found by adding
+        # four tests to this class and watching two unrelated ones start
+        # failing with 429.) `AdminApiTestCase` in `adminapi/tests.py`
+        # already does this; this module did not.
+        cache.clear()
         # The user agent is a client default rather than something set
         # after login, so the login request itself carries it -- that is
         # the event most worth having it on.
@@ -545,6 +556,85 @@ class AuditedEndpointCoverageTests(TestCase):
     def test_the_user_agent_is_captured(self):
         entry = AdminAuditLog.objects.filter(action=AuditAction.LOGIN).first()
         self.assertEqual(entry.user_agent, "ProxyCrackConsole/1.0")
+
+    # -- sign-out (P24) ----------------------------------------------------
+    #
+    # Login success and login failure were rows from the start; the end of
+    # the session was a log line and nothing else, which made admin
+    # sign-out the one authentication event on this API that left no
+    # evidence. The mobile logout built later *was* audited, so the two
+    # surfaces disagreed on the one axis P9 exists to settle.
+
+    def fresh_session(self):
+        """A second login, returning its refresh token.
+
+        Logging in again rather than reusing setUp's session because the
+        setUp login kept only the access token, and a logout test needs
+        the refresh token that logout actually consumes.
+        """
+        response = self.client.post(
+            reverse("adminapi:auth-login"),
+            {"email": "root@example.com", "password": "Str0ngPass!phrase"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {response.data['access']}")
+        return response.data["refresh"]
+
+    def test_admin_logout_is_recorded(self):
+        refresh = self.fresh_session()
+        response = self.client.post(
+            reverse("adminapi:auth-logout"), {"refresh": refresh}, format="json"
+        )
+        self.assertEqual(response.status_code, 204)
+
+        entry = AdminAuditLog.objects.get(action=AuditAction.LOGOUT_ADMIN)
+        self.assertEqual(entry.actor_id, self.superuser.pk)
+        self.assertEqual(entry.actor_email, self.superuser.email)
+        self.assertEqual(entry.target_type, "user")
+        self.assertEqual(entry.target_id, str(self.superuser.pk))
+        self.assertTrue(entry.ip)
+        self.assertEqual(entry.user_agent, "ProxyCrackConsole/1.0")
+        # `blacklisted` means a live session really ended here. The other
+        # outcome means the client sent something already dead, which is a
+        # record of intent rather than of effect -- and after a laptop
+        # goes missing, those are different answers.
+        self.assertEqual(entry.payload["outcome"], "blacklisted")
+
+    def test_admin_logout_is_distinguishable_from_the_mobile_one(self):
+        """Both surfaces answer "when did this account last end a session".
+        One query should cover both, and a filter should split them."""
+        refresh = self.fresh_session()
+        self.client.post(
+            reverse("adminapi:auth-logout"), {"refresh": refresh}, format="json"
+        )
+        entry = AdminAuditLog.objects.get(action=AuditAction.LOGOUT_ADMIN)
+        self.assertEqual(entry.payload["via"], "admin")
+        self.assertNotEqual(AuditAction.LOGOUT_ADMIN, AuditAction.LOGOUT)
+        self.assertEqual(entry.payload["path"], "/api/admin/auth/logout/")
+
+    def test_a_logout_with_an_unusable_token_is_still_recorded(self):
+        """A sign-out that could not end anything is still a sign-out, and
+        the 204 would otherwise hide that nothing happened."""
+        self.fresh_session()
+        response = self.client.post(
+            reverse("adminapi:auth-logout"), {"refresh": "garbage"}, format="json"
+        )
+        self.assertEqual(response.status_code, 204)
+        entry = AdminAuditLog.objects.get(action=AuditAction.LOGOUT_ADMIN)
+        self.assertEqual(entry.payload["outcome"], "token_unusable")
+
+    def test_logout_never_records_the_token(self):
+        """The refresh token is a live credential for up to 30 days. An
+        audit row holding it would be a second copy of the thing the
+        endpoint exists to destroy."""
+        refresh = self.fresh_session()
+        self.client.post(
+            reverse("adminapi:auth-logout"), {"refresh": refresh}, format="json"
+        )
+        entry = AdminAuditLog.objects.get(action=AuditAction.LOGOUT_ADMIN)
+        blob = json.dumps(entry.payload) + json.dumps(entry.changes)
+        self.assertNotIn(refresh, blob)
 
     # -- credentials ------------------------------------------------------
 
@@ -673,6 +763,9 @@ class AuditedEndpointCoverageTests(TestCase):
             "admin_subscription_cancelled",
             "admin_login",
             "admin_login_failed",
+            # P24: the end of a session is as much an authentication event
+            # as its start, and it was the only one of the three missing.
+            "admin_logout",
             "admin_probe_run",
         }
         self.assertTrue(required.issubset({value for value, _ in AuditAction.choices}))
@@ -685,6 +778,9 @@ class AuditedEndpointCoverageTests(TestCase):
 
 class AuditLogEndpointTests(TestCase):
     def setUp(self):
+        # Same reason as AuditedEndpointCoverageTests: this class signs in
+        # per test against a per-minute budget shared across the process.
+        cache.clear()
         self.client = APIClient()
         self.staff = User.objects.create_superuser(
             "root@example.com", "Str0ngPass!phrase"

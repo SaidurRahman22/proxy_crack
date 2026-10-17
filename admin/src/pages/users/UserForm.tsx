@@ -181,7 +181,7 @@ export function UserFormDrawer({
         />
         <ToggleField
           label="Superuser"
-          hint="Full Django Admin access at /admin/ as well."
+          hint="Can grant and revoke staff and superuser on other accounts."
           checked={form.values.is_superuser}
           onChange={(checked) => form.set('is_superuser', checked)}
         />

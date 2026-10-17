@@ -51,8 +51,12 @@ class PrivilegeEscalationDenied(_StructuredDetailMixin, PermissionDenied):
     change its own.
 
     The contract treats `is_staff` and `is_superuser` as ordinary fields,
-    which would make every staff account one PATCH away from Django Admin.
-    This is the boundary *between* staff -- the only one the design has.
+    which would make every staff account one PATCH away from superuser --
+    and so from minting further staff, resetting any password and
+    rewriting the entitlement model. (The original argument was "one PATCH
+    away from Django Admin"; that console is gone, which removed the
+    broadest consequence and none of the escalation.) This is the boundary
+    *between* staff -- the only one the design has.
     """
 
     default_detail = (
@@ -65,8 +69,13 @@ class SetPasswordDenied(_StructuredDetailMixin, PermissionDenied):
     """Resetting a peer's or a superuser's password is account takeover.
 
     It is a quieter path to the same place as `is_superuser`: set the
-    superuser's password, then sign in at `/admin/`, which is a broader
-    write surface than this API.
+    superuser's password, then sign in as them. This used to be argued via
+    Django Admin at `/admin/`, which had a broader write surface than this
+    API. That console is gone, and the boundary did not weaken with it --
+    it is now the *only* thing standing between a staff account and the
+    superuser's, because the superuser's powers on this API alone are
+    minting staff, changing every privilege flag, and reading the entire
+    decrypted inventory unscoped.
     """
 
     default_detail = "You are not allowed to set this user's password."

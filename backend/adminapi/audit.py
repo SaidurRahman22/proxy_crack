@@ -1,11 +1,16 @@
 """Audit events for the admin API.
 
-Replacing Django Admin with an SPA loses `django.contrib.admin.LogEntry`,
-which today records every add, change and delete with an actor, an object
-and a change message. Nothing in the contract replaces it. This module is
-the minimum replacement: a single structured event stream on a dedicated
-logger, so shipping it off-host is a logging-config change rather than a
-code change.
+Replacing Django Admin with an SPA lost `django.contrib.admin.LogEntry`,
+which had recorded every add, change and delete with an actor, an object
+and a change message. Nothing in the contract replaced it. This module is
+that replacement: a single structured event stream on a dedicated logger,
+so shipping it off-host is a logging-config change rather than a code
+change.
+
+Django Admin has since been removed outright and `django_admin_log`
+dropped (`core/migrations/0002_drop_django_admin_log.py`), so this is no
+longer "the replacement for the trail we are about to lose" -- it is the
+only administrative trail there is.
 
 Three rules:
 

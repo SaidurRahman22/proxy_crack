@@ -300,7 +300,29 @@ class AdminLogoutView(AdminViewMixin, GenericAPIView):
 
     Blacklists the refresh token. Returns 204 even when the token is already
     expired or blacklisted: logout is the SPA's escape hatch and must never
-    fail in a way that strands a session. The failure is logged.
+    fail in a way that strands a session.
+
+    **Audited (P24).** This wrote a log line and no audit row, while the
+    mobile logout built later wrote both. That asymmetry was a P9
+    regression on the console surface: P9 made audit *rows* the evidence --
+    the copy that survives a log handler nobody configured -- so admin
+    sign-out was the one authentication event on this API leaving none.
+    Login success and login failure were both already rows; the end of the
+    session was the missing third. It now goes through the same `audit()`
+    seam, which is also what gives it the IP, the user agent and the
+    durable write for free.
+
+    `outcome` is recorded because the two cases are operationally
+    different and indistinguishable afterwards otherwise: `blacklisted`
+    means a live session really was ended here, while `token_unusable`
+    means the SPA sent something already dead and the row is a record of
+    intent rather than of effect. Asking "when did this staff account last
+    actually end a session" has to be answerable after a laptop goes
+    missing.
+
+    `via="admin"` mirrors the mobile endpoint's `via="mobile"` on the same
+    `logout` action, so one query answers the question across both
+    surfaces and a filter on `via` splits them.
     """
 
     serializer_class = LogoutSerializer
@@ -311,9 +333,24 @@ class AdminLogoutView(AdminViewMixin, GenericAPIView):
         try:
             RefreshToken(serializer.validated_data["refresh"]).blacklist()
         except TokenError as exc:
+            outcome = "token_unusable"
             logger.info("admin_logout_token_unusable user=%s (%s)", request.user.pk, exc)
         else:
+            outcome = "blacklisted"
             logger.info("admin_logout user=%s", request.user.pk)
+
+        # After the blacklist attempt, never before: an audit row claiming
+        # a session ended is only worth writing once the attempt to end it
+        # has resolved one way or the other. `audit()` is explicitly built
+        # not to fail the request it is recording, so there is no risk in
+        # the ordering.
+        audit(
+            "admin_logout",
+            request=request,
+            target_user_id=request.user.pk,
+            outcome=outcome,
+            via="admin",
+        )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -483,10 +520,13 @@ class AdminUserViewSet(AdminModelViewSet):
 
         Setting another account's password is account takeover, and the
         quietest route to the worst outcome: set the superuser's password,
-        then sign in at `/admin/`, which can edit groups and permissions
-        this API does not even expose. So resetting a *peer's* password is
-        a superuser action, and resetting a superuser's password is a
-        superuser action. Your own is always yours.
+        then sign in as them. With Django Admin removed there is no
+        second, broader console at the end of that path any more -- which
+        does not soften the rule, it sharpens it, because this boundary is
+        now the only thing between a staff account and a superuser's. So
+        resetting a *peer's* password is a superuser action, and resetting
+        a superuser's password is a superuser action. Your own is always
+        yours.
         """
         actor = self.request.user
         if target.pk == actor.pk:
@@ -1179,22 +1219,27 @@ class AdminProxyViewSet(AdminModelViewSet):
     def upload_csv(self, request):
         """`multipart/form-data` field `file` -> 201 + the batch tally.
 
-        Parsing is `proxies.importers.import_proxies_from_csv`, unchanged --
-        the same routine the Django Admin upload uses. Re-implementing the
-        header aliasing, the per-row commit and the premium-by-default tier
-        rule here would mean two parsers drifting apart.
+        Parsing is `proxies.importers.import_proxies_from_csv`, unchanged.
+        It was deliberately kept out of `admin.py` so a second caller would
+        never need to re-implement the header aliasing, the per-row commit
+        and the premium-by-default tier rule -- which is why removing
+        Django Admin cost this endpoint nothing. **This is now the only
+        upload path**; the `ProxyAdmin.get_urls` -> `upload_csv_view` page
+        and `proxies.forms.ProxyCSVUploadForm` are gone, and the React
+        console has always called here.
         """
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         upload = serializer.validated_data["file"]
 
-        # The 5 MB cap that exists today lives in `proxies.forms`, a Django
-        # *admin form* this endpoint never touches, and
-        # DATA_UPLOAD_MAX_MEMORY_SIZE does not apply to uploaded files. So
-        # it is re-enforced here, and before `import_proxies_from_csv`
-        # reads the file -- the importer holds the whole thing in memory
-        # twice (bytes, then decoded StringIO), so the check has to happen
-        # before the read, not inside it.
+        # The 5 MB cap. It used to live in `proxies.forms`, a Django
+        # *admin form* this endpoint never touched; that form has since
+        # been deleted along with the console, so this is the only place
+        # the cap exists. DATA_UPLOAD_MAX_MEMORY_SIZE does not apply to
+        # uploaded files, so nothing else enforces it. Checked before
+        # `import_proxies_from_csv` reads the file -- the importer holds
+        # the whole thing in memory twice (bytes, then decoded StringIO),
+        # so the check has to happen before the read, not inside it.
         max_bytes = getattr(settings, "PROXY_CSV_MAX_BYTES", 5242880)
         if upload.size and upload.size > max_bytes:
             return Response(

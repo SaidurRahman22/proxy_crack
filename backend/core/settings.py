@@ -49,12 +49,28 @@ DEBUG = env_bool("DJANGO_DEBUG", True)
 ALLOWED_HOSTS = env_list("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1,[::1]")
 CSRF_TRUSTED_ORIGINS = env_list("DJANGO_CSRF_TRUSTED_ORIGINS")
 
+# `django.contrib.admin` is deliberately absent -- see core/urls.py for why
+# the fallback console was removed rather than merely unmounted.
+#
+# Two of its former companions were audited rather than assumed:
+#
+# * `django.contrib.messages` had exactly one consumer in the whole
+#   project, `ProxyAdmin.upload_csv_view`'s `message_user` calls. It is
+#   gone with it, along with its middleware and context processor.
+# * `django.contrib.staticfiles` **stays**, because it has a consumer that
+#   is not the admin: DRF's browsable API. `rest_framework/base.html`
+#   does `{% load static %}` and the package ships `rest_framework/static/`,
+#   which only this app serves under `runserver`. The browsable renderer
+#   is mounted on purpose in DEBUG (`api-auth/` in core/urls.py, and
+#   `AdminViewMixin.renderer_classes`), so removing it would have left the
+#   dev console unstyled for no gain.
 INSTALLED_APPS = [
-    "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
+    # Required by AuthenticationMiddleware, and by the DEBUG-only DRF
+    # browsable-API login. Nothing issues a session cookie when DEBUG is
+    # off.
     "django.contrib.sessions",
-    "django.contrib.messages",
     "django.contrib.staticfiles",
     # third party
     "rest_framework",
@@ -78,7 +94,8 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
-    "django.contrib.messages.middleware.MessageMiddleware",
+    # No MessageMiddleware: the messages framework went with Django Admin,
+    # which was its only user.
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
@@ -87,13 +104,18 @@ ROOT_URLCONF = "core.urls"
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
+        # The project-level `templates/` directory held nothing but the two
+        # Django Admin overrides for the CSV upload page and is gone. The
+        # entry stays because `APP_DIRS` templates (DRF's browsable API,
+        # django-filter's form) still render through this engine and a
+        # project override directory is where anyone would put the next
+        # one.
         "DIRS": [BASE_DIR / "templates"],
         "APP_DIRS": True,
         "OPTIONS": {
             "context_processors": [
                 "django.template.context_processors.request",
                 "django.contrib.auth.context_processors.auth",
-                "django.contrib.messages.context_processors.messages",
             ],
         },
     },
@@ -149,7 +171,13 @@ AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
 ]
 
-LOGIN_URL = "/admin/login/"
+# No LOGIN_URL. It pointed at `/admin/login/`, which no longer resolves,
+# and nothing in this project redirects to it: there is no `login_required`
+# view, DRF's browsable API links to `rest_framework:login` by name, and
+# both APIs answer 401 with a JSON body rather than a redirect. A setting
+# naming a 404 is worse than no setting, because the next person to add a
+# `login_required` view would inherit a broken redirect instead of Django's
+# visible default.
 
 
 # ---------------------------------------------------------------------------
@@ -578,6 +606,12 @@ PROVIDER_SYNC_API_MAX_RECORDS = env_int("PROVIDER_SYNC_API_MAX_RECORDS", 500)
 # deletable by a superuser, and gone entirely if nobody ships them
 # off-host. `adminapi.models.AdminAuditLog` is the durable replacement.
 #
+# Django Admin has since been removed outright and `django_admin_log`
+# dropped from the schema, so this table is not a replacement for a trail
+# that still exists somewhere else -- it is the whole of the trail. Its
+# append-only guarantee (model, queryset, and a database trigger) is
+# correspondingly more load-bearing than when it was written.
+#
 # Retention here is an order of magnitude longer than the probe retention
 # (30 days) and that gap is the point. Probe rows are telemetry: the newest
 # ones answer every question worth asking and the table grows by millions a
@@ -610,10 +644,18 @@ ADMIN_AUDIT_PERSIST = env_bool("ADMIN_AUDIT_PERSIST", True)
 # Scoped to /api/admin/ by CORS_URLS_REGEX so the mobile API's responses are
 # byte-for-byte what they were before. CORS_ALLOW_ALL_ORIGINS is never used:
 # this API is unscoped and staff-only, so the origin list stays explicit and
-# environment-driven. Credentials are off because the SPA authenticates with
-# a Bearer header, not a cookie -- there is nothing for a browser to attach
-# to a cross-origin request on its own, which is also what keeps CSRF out of
-# scope here.
+# environment-driven.
+#
+# CORS_ALLOW_CREDENTIALS stays False, and removing Django Admin changed what
+# that setting is *for*. It used to be a containment measure: `/admin/`
+# issued session cookies, so allowing credentialed cross-origin requests
+# would have put an ambient browser credential within reach of the origin
+# list. With the admin gone, no production request path issues a session
+# cookie at all -- the only thing that still can is the DEBUG-only DRF
+# browsable-API login. So the setting is no longer holding anything back;
+# it now simply matches the design. Turning it on would grant nothing the
+# SPA needs (it sends a Bearer header, which no browser attaches on its
+# own) and would reintroduce CSRF as a live concern for the sake of it.
 # ---------------------------------------------------------------------------
 
 CORS_ALLOWED_ORIGINS = env_list(

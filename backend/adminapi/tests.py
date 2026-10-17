@@ -22,7 +22,7 @@ from django.core.cache import cache
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.conf import settings
 from django.test import TestCase, override_settings
-from django.urls import path
+from django.urls import NoReverseMatch, path, reverse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -401,11 +401,22 @@ class StaffGateTests(AdminApiTestCase):
             client.get("/api/admin/users/").status_code, status.HTTP_403_FORBIDDEN
         )
 
-    def test_a_django_admin_session_cookie_is_not_admin_api_access(self):
-        """`/admin/` still issues session cookies. If SessionAuthentication
-        were ever added "so the browsable API works", those cookies would
-        become admin API credentials -- and CSRF would come back with
-        them."""
+    def test_a_session_cookie_is_not_admin_api_access(self):
+        """A Django session is not an admin API credential.
+
+        This used to be argued from `/admin/`, which issued session
+        cookies. It is gone, which narrows the exposure but does not close
+        the hole: `django.contrib.sessions` is still installed (the DEBUG
+        browsable-API login needs it), so `client.login()` still mints a
+        real session cookie. If `SessionAuthentication` were ever added
+        "so the browsable API works", that cookie would become an admin
+        API credential -- an ambient, browser-attached one -- and CSRF
+        would come back with it.
+
+        So the assertion is on the configuration, not on the absence of a
+        console: JWT-only at the project default, and `AdminJWTAuthentication`
+        alone on the admin mixin.
+        """
         self.assertNotIn(
             "rest_framework.authentication.SessionAuthentication",
             settings.REST_FRAMEWORK["DEFAULT_AUTHENTICATION_CLASSES"],
@@ -1735,9 +1746,31 @@ class MobileApiUnaffectedTests(AdminApiTestCase):
         response = self.client.get("/api/proxies/")
         self.assertEqual(response.data["count"], 1)
 
-    def test_django_admin_is_still_mounted(self):
-        response = self.client.get("/admin/login/")
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
+    def test_django_admin_is_not_mounted(self):
+        """D12 kept Django Admin at `/admin/` as a superuser fallback.
+        That is reversed: the React console on `/api/admin/` is the only
+        administrative surface.
+
+        Asserted on the index, the login page and an arbitrary model page,
+        because unmounting the root is not the same as the subtree being
+        gone -- a stray `path("admin/...")` added later would pass a test
+        that only checked `/admin/`.
+        """
+        for url in ("/admin/", "/admin/login/", "/admin/proxies/proxy/"):
+            self.assertEqual(
+                self.client.get(url).status_code,
+                status.HTTP_404_NOT_FOUND,
+                url,
+            )
+
+    def test_the_admin_app_is_not_installed(self):
+        """Unmounting the URL leaves the app registered, its `admin.py`
+        modules imported and `django_admin_log` in the schema. The point
+        of the removal was to delete the session-cookie surface, not to
+        hide it, so the app itself has to be gone."""
+        self.assertNotIn("django.contrib.admin", settings.INSTALLED_APPS)
+        with self.assertRaises(NoReverseMatch):
+            reverse("admin:index")
 
 
 # ---------------------------------------------------------------------------

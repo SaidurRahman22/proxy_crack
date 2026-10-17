@@ -134,9 +134,12 @@ class AdminUserSerializer(serializers.ModelSerializer):
 
     The contract lists `is_staff` and `is_superuser` as ordinary CRUD
     fields. Taken literally that makes staff equal to superuser: any staff
-    account can `PATCH {"is_superuser": true}` onto itself and gain Django
-    Admin at `/admin/`, which is a far broader write surface than this API.
-    So:
+    account can `PATCH {"is_superuser": true}` onto itself and acquire
+    every privilege the design reserves -- minting further staff, resetting
+    any password, and changing the entitlement model. (This used to be
+    argued via Django Admin at `/admin/`, a broader write surface still;
+    that console has since been removed, which makes this boundary the
+    whole of the defence rather than the first half of it.) So:
 
     * **Only a superuser may change a privilege flag.** Enforced in
       `get_fields` (the flags become read-only), which keeps a round-trip

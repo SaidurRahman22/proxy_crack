@@ -9,7 +9,6 @@ from datetime import timedelta
 
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
-from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -456,71 +455,26 @@ class CSVImportTests(APITestCase):
         self.assertEqual(proxy.password, "new")
         self.assertNotIn("new", raw_credentials(proxy.pk)["password"])
 
-
-class AdminSmokeTests(APITestCase):
-    def setUp(self):
-        cache.clear()
-        self.staff = User.objects.create_superuser("admin@example.com", "Str0ngPassphrase!")
-        self.client.force_login(self.staff)
-
-    def test_csv_upload_page_renders(self):
-        response = self.client.get(reverse("admin:proxies_proxy_upload_csv"))
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-
-    def test_csv_upload_creates_batch_and_proxies(self):
-        upload = io.BytesIO(b"protocol,host,port,tier\nhttp,203.0.113.50,3128,free\n")
-        upload.name = "batch.csv"
-        response = self.client.post(
-            reverse("admin:proxies_proxy_upload_csv"), {"csv_file": upload}, follow=True
-        )
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(Proxy.objects.count(), 1)
-        self.assertEqual(Proxy.objects.get().upload_batch.success_count, 1)
-
-    def test_proxy_changelist_renders(self):
-        response = self.client.get(reverse("admin:proxies_proxy_changelist"))
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-
-    def test_admin_change_form_round_trips_an_encrypted_credential(self):
-        proxy = Proxy.objects.create(
-            protocol=ProxyProtocol.SOCKS5,
-            host="198.51.100.90",
-            port=1080,
-            tier=ProxyTier.PREMIUM,
-            username="alice",
-            password="s3cret",
-        )
-        url = reverse("admin:proxies_proxy_change", args=[proxy.pk])
-        rendered = self.client.get(url)
-        self.assertEqual(rendered.status_code, status.HTTP_200_OK)
-        # The operator sees plaintext in the form, and the browser is told
-        # the plaintext limit rather than the ciphertext width.
-        self.assertContains(rendered, 'value="alice"')
-        self.assertContains(rendered, 'maxlength="255"')
-
-        posted = self.client.post(
-            url,
-            {
-                "protocol": ProxyProtocol.SOCKS5,
-                "host": "198.51.100.90",
-                "port": "1080",
-                "username": "alice",
-                "password": "changed-in-admin",
-                "ss_method": "",
-                "country": "NL",
-                "city": "",
-                "tier": ProxyTier.PREMIUM,
-                "is_enabled": "on",
-                "is_alive": "on",
-                "latency_ms": "",
-                "last_checked_0": "",
-                "last_checked_1": "",
-                "chain_hops-TOTAL_FORMS": "0",
-                "chain_hops-INITIAL_FORMS": "0",
-            },
-            follow=True,
-        )
-        self.assertEqual(posted.status_code, status.HTTP_200_OK)
-        proxy.refresh_from_db()
-        self.assertEqual(proxy.password, "changed-in-admin")
-        self.assertNotIn("changed-in-admin", raw_credentials(proxy.pk)["password"])
+# `AdminSmokeTests` lived here and is deleted along with Django Admin. It
+# covered four things; this is where each went:
+#
+#   test_csv_upload_page_renders
+#   test_csv_upload_creates_batch_and_proxies
+#       The CSV upload is now `POST /api/admin/proxies/upload_csv/` only,
+#       and it is better covered there -- `adminapi/test_security.py`
+#       exercises the size cap, the extension check, the row cap, the
+#       traversal-shaped filename and the credential-preservation rule
+#       (V1/T8), none of which the admin form path tested. The parser
+#       itself, `proxies.importers`, is unchanged and still tested above.
+#
+#   test_proxy_changelist_renders
+#       A page that no longer exists.
+#
+#   test_admin_change_form_round_trips_an_encrypted_credential
+#       The only test anywhere that exercised
+#       `EncryptedCharField.formfield()` -- the override that makes a form
+#       limit the plaintext a user types rather than the width of the
+#       Fernet token it becomes. The field keeps that behaviour (any
+#       ModelForm or django-filter form would rely on it), so the property
+#       is now asserted directly, without a console, in
+#       `core.tests.EncryptedFieldFormTests`.

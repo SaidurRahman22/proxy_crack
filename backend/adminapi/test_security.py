@@ -43,9 +43,11 @@ from proxies.models import Proxy, ProxyProtocol, ProxyTier, UploadBatch
 
 class PrivilegeEscalationTests(AdminApiTestCase):
     """The contract grants a flat `is_staff` role with no internal
-    boundary. Without these, staff *is* superuser: one PATCH reaches Django
-    Admin at `/admin/`, which can edit groups and permissions this API does
-    not even expose."""
+    boundary. Without these, staff *is* superuser: one PATCH mints further
+    staff, resets any password and rewrites the entitlement model. The
+    original argument ran through Django Admin at `/admin/`, a broader
+    write surface still; removing that console removed the illustration,
+    not the escalation."""
 
     def setUp(self):
         super().setUp()
@@ -185,8 +187,9 @@ class SetPasswordBoundaryTests(AdminApiTestCase):
         self.authenticate(self.staff)
 
     def test_staff_cannot_set_the_superusers_password(self):
-        """The quietest route to the worst outcome: own the superuser, then
-        sign in at `/admin/`, a broader write surface than this API."""
+        """The quietest route to the worst outcome: own the superuser,
+        then sign in as them. With Django Admin removed this boundary is
+        the whole of the defence rather than its first half."""
         response = self.client.post(
             f"/api/admin/users/{self.superuser.pk}/set_password/",
             {"password": NEW_PASSWORD},
@@ -483,8 +486,10 @@ class CSVLimitTests(AdminApiTestCase):
         self.authenticate(self.staff)
 
     def test_a_non_csv_extension_is_refused_on_the_api_path(self):
-        """The existing extension check lives in `proxies/forms.py`, a
-        Django admin form this endpoint never touches."""
+        """The extension check used to live in `proxies/forms.py`, a
+        Django admin form this endpoint never touched -- so it was
+        re-implemented here. That form is gone with the console and this
+        is now the only check of its kind in the project."""
         response = self.client.post(
             "/api/admin/proxies/upload_csv/",
             {"file": SimpleUploadedFile("payload.png", b"\x89PNG\r\n", "image/png")},
@@ -878,9 +883,16 @@ class CorsHardeningTests(AdminApiTestCase):
             )
 
     def test_credentials_are_never_allowed(self):
-        """The token travels in the Authorization header, and `/admin/`
-        still issues session cookies -- allowing credentialed cross-origin
-        requests would put those in reach."""
+        """The token travels in the Authorization header, so there is
+        nothing a browser would attach on its own and nothing to gain.
+
+        The reason this matters changed when Django Admin was removed. It
+        used to be containment: `/admin/` issued session cookies and
+        credentialed CORS would have put them within reach of the origin
+        list. Production now issues no identity-bearing cookie at all, so
+        the setting holds nothing back -- but turning it on would
+        reintroduce CSRF as a live concern in exchange for nothing, which
+        is a worse trade than the old one."""
         self.assertFalse(settings.CORS_ALLOW_CREDENTIALS)
         self.authenticate(self.staff)
         response = self.client.get(

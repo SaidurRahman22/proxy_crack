@@ -36,6 +36,7 @@ __all__ = [
     "AdminLoginEmailThrottle",
     "AdminLoginIPThrottle",
     "AdminProbeThrottle",
+    "AdminProviderSyncThrottle",
     "AdminScopedThrottle",
 ]
 
@@ -163,3 +164,24 @@ class AdminProbeThrottle(UserRateThrottle):
     """
 
     scope = "admin_probe"
+
+
+class AdminProviderSyncThrottle(UserRateThrottle):
+    """Bounds operator-triggered provider syncs. The tightest scope here.
+
+    Three costs stack on one press, and no other admin endpoint carries
+    all three:
+
+    * it is an authenticated, multi-page request against a vendor that
+      rate limits us and can suspend the account -- and under **P4** that
+      account is already the business model's weakest point;
+    * it holds a request worker for the whole page walk;
+    * it is the only endpoint that can disable a large slice of the
+      sellable inventory in a single call.
+
+    The scheduled `sync_webshare` command is the normal path. This is the
+    "the provider says they rotated our addresses, pull it now" button,
+    and six of those an hour is generous for that.
+    """
+
+    scope = "admin_provider_sync"

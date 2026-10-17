@@ -187,3 +187,48 @@ def check_ip_intel_has_a_resolver(app_configs, **kwargs):
             id="proxies.W008",
         )
     ]
+
+
+@register(Tags.compatibility, deploy=True)
+def check_provider_sync_has_a_token(app_configs, **kwargs):
+    """The Webshare adapter needs an API token, and there is no fallback.
+
+    A warning rather than an error, and `deploy=True`, for the same reason
+    `proxies.W008` is: on a development machine without the token the
+    feature simply does not run, which is harmless and correct, and a
+    warning on every `check` forever is a warning everybody scrolls past.
+
+    In a deployment it means the scheduled sync is failing every night
+    with a non-zero exit nobody is watching, and the symptom -- inventory
+    quietly decaying as addresses rotate -- takes weeks to become visible
+    and does not look like a configuration problem when it does.
+
+    The check deliberately reports only presence. It never logs the value,
+    a prefix of it, or its length: the token lists every proxy credential
+    on the account in one request, so `check` output, which is pasted into
+    tickets and CI logs, is the last place any part of it should appear.
+    """
+    from django.conf import settings
+
+    backend = str(getattr(settings, "PROVIDER_SYNC_BACKEND", ""))
+    if not backend.endswith("WebshareSync"):
+        return []
+
+    if str(getattr(settings, "WEBSHARE_API_TOKEN", "") or "").strip():
+        return []
+
+    return [
+        Warning(
+            "PROVIDER_SYNC_BACKEND is the Webshare adapter but "
+            "WEBSHARE_API_TOKEN is not set. Every `sync_webshare` run will "
+            "fail, the provider's current inventory will never be loaded, "
+            "and the symptom -- addresses rotating away and never being "
+            "replaced -- looks like proxies dying rather than like a "
+            "missing variable.",
+            hint="Set WEBSHARE_API_TOKEN in backend/.env. Treat it like "
+            "PROXY_CRED_KEY: one request with it returns every proxy "
+            "credential on the account, so it is never committed, never "
+            "logged and never pasted into a ticket.",
+            id="proxies.W009",
+        )
+    ]

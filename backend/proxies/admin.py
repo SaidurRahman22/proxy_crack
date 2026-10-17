@@ -15,6 +15,7 @@ from proxies.importers import CSVImportError, import_proxies_from_csv
 from proxies.models import (
     ChainHop,
     IpIntelRecord,
+    ProviderSyncRun,
     Proxy,
     ProxyChain,
     ProxyProbe,
@@ -32,6 +33,7 @@ class ProxyAdmin(admin.ModelAdmin):
         "country",
         "city",
         "provider",
+        "external_id",
         "is_enabled",
         "is_alive",
         "quality_score",
@@ -39,8 +41,18 @@ class ProxyAdmin(admin.ModelAdmin):
         "latency_p95_ms",
         "last_checked",
     )
-    list_filter = ("protocol", "tier", "is_enabled", "is_alive", "country", "provider")
-    search_fields = ("host", "country", "city", "provider")
+    list_filter = (
+        "protocol",
+        "tier",
+        "is_enabled",
+        # Distinguishes "the provider stopped listing this" from "an
+        # operator switched it off", which have opposite remedies.
+        "disabled_by_sync",
+        "is_alive",
+        "country",
+        "provider",
+    )
+    search_fields = ("host", "country", "city", "provider", "external_id")
     list_select_related = ("upload_batch",)
     change_list_template = "admin/proxies/proxy/change_list.html"
     # Derived from ProxyProbe by proxies.health. Editable here would mean
@@ -135,6 +147,39 @@ class UploadBatchAdmin(admin.ModelAdmin):
 
     def has_add_permission(self, request):
         # Batches are created by the CSV upload view, never by hand.
+        return False
+
+
+@admin.register(ProviderSyncRun)
+class ProviderSyncRunAdmin(admin.ModelAdmin):
+    """Read-only, like `UploadBatch`. A run row is a record of what
+    happened; an editable one is not a record."""
+
+    list_display = (
+        "provider",
+        "source",
+        "status",
+        "dry_run",
+        "fetched_count",
+        "created_count",
+        "updated_count",
+        "adopted_count",
+        "disabled_count",
+        "reenabled_count",
+        "failed_count",
+        "started_at",
+    )
+    list_filter = ("provider", "status", "dry_run", "started_at")
+    search_fields = ("provider", "source", "errors")
+    date_hierarchy = "started_at"
+    readonly_fields = tuple(
+        field.name for field in ProviderSyncRun._meta.fields if field.name != "id"
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
         return False
 
 

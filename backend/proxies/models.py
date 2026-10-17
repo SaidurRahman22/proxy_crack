@@ -89,6 +89,152 @@ class UploadBatch(models.Model):
         return f"{self.filename} ({self.success_count}/{self.row_count} ok)"
 
 
+class ProviderSyncStatus(models.TextChoices):
+    """How a sync run ended.
+
+    `PARTIAL` is the value that matters. It means the provider's listing
+    was not fully retrieved -- a page failed, or a cap cut the run short --
+    and therefore that the "this endpoint has vanished" conclusion could
+    not be drawn. A run that disabled nothing because it never saw the
+    whole inventory and a run that disabled nothing because nothing
+    vanished are very different facts, and an operator reading a tally of
+    zeroes needs to be able to tell them apart.
+    """
+
+    OK = "ok", "Completed on a full listing"
+    PARTIAL = "partial", "Completed on a partial listing"
+    FAILED = "failed", "Failed"
+
+
+class ProviderSyncRun(models.Model):
+    """One run of `proxies.providers.sync_provider`, with its tally.
+
+    The `UploadBatch` of provider syncs, and for the same reason: an
+    unattended job that mutates the sellable inventory must leave a record
+    an operator can read afterwards. A CSV import at least has a human
+    watching it; this one runs on a timer at 4am, and "inventory decayed
+    over six weeks" is only diagnosable if each run said what it did.
+
+    There is no foreign key from `Proxy` back to a run, unlike
+    `Proxy.upload_batch`. A proxy is touched by every sync for as long as
+    the operator rents it, so "the run that last touched this row" would
+    be rewritten constantly and would answer no useful question; the tally
+    plus `errors` is what gets read.
+    """
+
+    provider = models.CharField(
+        max_length=100,
+        db_index=True,
+        help_text="The `Proxy.provider` label this run reconciled.",
+    )
+    source = models.CharField(
+        max_length=64,
+        help_text="Which ProviderSync implementation produced the listing. "
+        "Recorded for the same reason IpIntelRecord.source is: a fake, a "
+        "live adapter and a future second vendor write the same columns.",
+    )
+    status = models.CharField(
+        max_length=16,
+        choices=ProviderSyncStatus.choices,
+        default=ProviderSyncStatus.OK,
+        db_index=True,
+    )
+    dry_run = models.BooleanField(
+        default=False,
+        help_text="A rehearsal. The counts are what the run would have "
+        "done; nothing was written.",
+    )
+    triggered_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="provider_sync_runs",
+        help_text="Null for the scheduled command; set when an operator "
+        "pressed the button.",
+    )
+
+    pages = models.PositiveIntegerField(default=0)
+    fetched_count = models.PositiveIntegerField(
+        default=0, help_text="Usable records the provider returned."
+    )
+    created_count = models.PositiveIntegerField(default=0)
+    updated_count = models.PositiveIntegerField(default=0)
+    adopted_count = models.PositiveIntegerField(
+        default=0,
+        help_text="Rows that already existed at this host:port with no "
+        "external_id and were claimed by the provider's id instead of "
+        "being duplicated. Expected to be non-zero exactly once per "
+        "endpoint -- on the first sync after a hand-added inventory.",
+    )
+    disabled_count = models.PositiveIntegerField(
+        default=0, help_text="Endpoints the provider stopped listing."
+    )
+    reenabled_count = models.PositiveIntegerField(
+        default=0, help_text="Sync-disabled endpoints the provider listed again."
+    )
+    unchanged_count = models.PositiveIntegerField(default=0)
+    failed_count = models.PositiveIntegerField(
+        default=0,
+        help_text="Records that could not be reconciled. Never a silent "
+        "partial write: a record that fails leaves its row untouched.",
+    )
+    invalid_count = models.PositiveIntegerField(
+        default=0,
+        help_text="Records the provider itself flagged invalid. Recorded, "
+        "deliberately not acted on -- liveness is `probe_proxies`' answer "
+        "to give, from our own measurements.",
+    )
+    intel_written = models.PositiveIntegerField(
+        default=0,
+        help_text="IpIntelRecord rows filled from the provider's ASN "
+        "fields, marked as provider-asserted rather than registry-verified.",
+    )
+    intel_skipped = models.PositiveIntegerField(
+        default=0,
+        help_text="Hosts left alone because a fresher registry lookup "
+        "already answers for them. Verified beats asserted.",
+    )
+    errors = models.TextField(
+        blank=True,
+        help_text="Per-record and per-page failures, one per line. Never "
+        "carries a credential or an API token -- see proxies.providers.",
+    )
+    started_at = models.DateTimeField(default=timezone.now, db_index=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = "provider sync run"
+        verbose_name_plural = "provider sync runs"
+        ordering = ("-started_at", "-pk")
+        indexes = [
+            models.Index(fields=["provider", "-started_at"], name="syncrun_provider_idx"),
+        ]
+
+    def __str__(self):
+        shape = "dry run" if self.dry_run else self.status
+        return (
+            f"{self.provider} {shape}: +{self.created_count} "
+            f"~{self.updated_count} -{self.disabled_count}"
+        )
+
+    @property
+    def duration_seconds(self):
+        if not self.finished_at:
+            return None
+        return (self.finished_at - self.started_at).total_seconds()
+
+    @property
+    def changed_count(self):
+        return (
+            self.created_count
+            + self.updated_count
+            + self.adopted_count
+            + self.disabled_count
+            + self.reenabled_count
+        )
+
+
 class Proxy(TimeStampedModel):
     """A single upstream proxy endpoint.
 
@@ -135,6 +281,37 @@ class Proxy(TimeStampedModel):
         help_text="The vendor this endpoint was bought from, as the "
         "operator thinks of it. Blank means unrecorded -- which the "
         "diversity analysis reports as unknown, never as 'different'.",
+    )
+    # The provider's own identifier for this endpoint, from
+    # `proxies.providers`. Blank for anything added by hand or by CSV.
+    #
+    # THIS, NOT host:port, IS THE SYNC'S IDENTITY KEY, and the distinction
+    # is the whole reason the column exists. A provider rotates addresses:
+    # the endpoint we rent keeps its id and changes its IP. Reconciling on
+    # host:port would read that one rotation as "an endpoint vanished and
+    # an unrelated one appeared" -- delete-and-insert -- and the new row
+    # would start life unprobed, with the real endpoint's `ProxyProbe`
+    # history stranded on a disabled row. Reconciling on
+    # (provider, external_id) sees it for what it is: the same rental, a
+    # new address, history intact.
+    external_id = models.CharField(
+        max_length=128,
+        blank=True,
+        db_index=True,
+        help_text="The provider's id for this endpoint. Stable across "
+        "address rotation, which is why the sync matches on it. Blank "
+        "means this row did not come from a provider sync.",
+    )
+    # Set only by the sync, when the sync disables a row because the
+    # provider stopped listing it. An operator-disabled proxy has this
+    # False, and that is what stops a later sync from quietly re-enabling
+    # something a human deliberately switched off: the sync may only undo
+    # its own decisions.
+    disabled_by_sync = models.BooleanField(
+        default=False,
+        help_text="True when `is_enabled` was cleared by a provider sync "
+        "rather than by an operator. Only a sync-disabled proxy is "
+        "re-enabled automatically when the provider lists it again.",
     )
     tier = models.CharField(
         max_length=20,
@@ -218,6 +395,15 @@ class Proxy(TimeStampedModel):
             models.UniqueConstraint(
                 fields=["protocol", "host", "port"],
                 name="uniq_proxy_endpoint",
+            ),
+            # One row per provider endpoint. Conditioned on a non-blank
+            # external_id so that the hundreds of hand-added and CSV rows
+            # -- all of which carry `""` -- do not collide with each
+            # other, which a plain unique index would have made them do.
+            models.UniqueConstraint(
+                fields=["provider", "external_id"],
+                condition=~Q(external_id=""),
+                name="uniq_proxy_provider_external_id",
             ),
         ]
         indexes = [

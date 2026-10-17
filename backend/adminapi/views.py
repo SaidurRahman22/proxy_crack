@@ -73,6 +73,7 @@ from adminapi.throttling import (
     AdminLoginEmailThrottle,
     AdminLoginIPThrottle,
     AdminProbeThrottle,
+    AdminProviderSyncThrottle,
 )
 from adminapi.filters import (
     MAX_IDS,
@@ -81,6 +82,7 @@ from adminapi.filters import (
     AdminContentFilter,
     AdminIpIntelFilter,
     AdminPlanFilter,
+    AdminProviderSyncRunFilter,
     AdminProxyFilter,
     AdminSubscriptionFilter,
     AdminUploadBatchFilter,
@@ -101,6 +103,7 @@ from adminapi.serializers import (
     AdminProxyDetailSerializer,
     AdminProxyListSerializer,
     AdminSubscriptionSerializer,
+    AdminProviderSyncRunSerializer,
     AdminUploadBatchSerializer,
     AdminUsageLogSerializer,
     AdminUserSerializer,
@@ -109,6 +112,7 @@ from adminapi.serializers import (
     IntelCandidateAnalysisSerializer,
     IntelRefreshSerializer,
     ProbeRequestSerializer,
+    ProviderSyncRequestSerializer,
     ProxyCSVUploadSerializer,
     SetPasswordSerializer,
     parse_batch_errors,
@@ -133,6 +137,13 @@ from proxies.intel import (
     lookup_hosts,
     normalise_host,
 )
+from proxies.providers import (
+    ProviderCredentialsMissing,
+    ProviderSyncError,
+    SyncAction,
+    get_provider_sync,
+    sync_provider,
+)
 from proxies.probing import (
     DEFAULT_CONCURRENCY,
     DEFAULT_TIMEOUT,
@@ -144,6 +155,7 @@ from proxies.probing import (
 from proxies.models import (
     ChainHop,
     IpIntelRecord,
+    ProviderSyncRun,
     Proxy,
     ProxyChain,
     ProxyProtocol,
@@ -759,6 +771,8 @@ class AdminProxyViewSet(AdminModelViewSet):
             return ProxyCSVUploadSerializer
         if self.action == "probe":
             return ProbeRequestSerializer
+        if self.action == "sync":
+            return ProviderSyncRequestSerializer
         return AdminProxyDetailSerializer
 
     def get_throttles(self):
@@ -774,6 +788,8 @@ class AdminProxyViewSet(AdminModelViewSet):
             return [AdminCSVUploadThrottle()]
         if action == "probe":
             return [AdminProbeThrottle()]
+        if action == "sync":
+            return [AdminProviderSyncThrottle()]
         return super().get_throttles()
 
     def _audit_credentials(self, instance, reason):
@@ -1020,6 +1036,140 @@ class AdminProxyViewSet(AdminModelViewSet):
             }
         )
 
+    @action(detail=False, methods=["post"], url_path="sync")
+    def sync(self, request):
+        """`POST /api/admin/proxies/sync/` -- pull the provider's listing now.
+
+        The normal path is the scheduled `sync_webshare` command. This is
+        the button for the case a schedule cannot serve: the provider has
+        just said they rotated addresses, and the operator needs the
+        inventory to agree with reality before the next tick.
+
+        **Defaults to a dry run**, unlike every other action on this
+        viewset, and deliberately. Reconciling is the only admin operation
+        that can disable a large slice of the sellable inventory on the
+        strength of a third party's HTTP response, so the rehearsal is what
+        you get by omission. `{"dry_run": false}` commits.
+
+        Synchronous, for the same reason `probe` is: a broker is an
+        operational dependency bought for a button pressed a few times a
+        week. The blast radius is capped instead --
+        `PROVIDER_SYNC_API_MAX_RECORDS`, a per-request timeout, and the
+        tightest throttle on the admin API.
+
+        **The API token appears nowhere in this handler's output.** Not in
+        the response, not in the audit payload, not in a log line, and not
+        in an error: `proxies.providers` constructs every message from
+        status codes and endpoint identities, never from a response body
+        (which carries the account's proxy passwords in plaintext).
+        """
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        dry_run = serializer.validated_data["dry_run"]
+        write_intel = serializer.validated_data["write_intel"]
+        limit = serializer.validated_data.get("limit") or int(
+            getattr(settings, "PROVIDER_SYNC_API_MAX_RECORDS", 500)
+        )
+
+        adapter = get_provider_sync()
+        try:
+            outcome = sync_provider(
+                adapter,
+                limit=limit,
+                dry_run=dry_run,
+                write_intel=write_intel,
+                triggered_by=request.user,
+            )
+        except ProviderCredentialsMissing as exc:
+            # 503, not 500: the service is correctly configured code that
+            # has not been given a credential. The message names the
+            # setting and never its value.
+            audit(
+                "admin_provider_sync_failed",
+                request=request,
+                level=logging.WARNING,
+                provider=getattr(adapter, "provider", adapter.name),
+                reason="credentials_missing",
+            )
+            return Response(
+                {"detail": str(exc), "code": "provider_credentials_missing"},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        except ProviderSyncError as exc:
+            audit(
+                "admin_provider_sync_failed",
+                request=request,
+                level=logging.WARNING,
+                provider=getattr(adapter, "provider", adapter.name),
+                reason="provider_unavailable",
+                detail=str(exc)[:200],
+            )
+            return Response(
+                {"detail": str(exc), "code": "provider_unavailable"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        audit(
+            "admin_provider_sync",
+            request=request,
+            # WARNING even on success: a run that disables inventory is a
+            # line a human should see, and distinguishing "worth reading"
+            # from "failed" is what the severity is for here.
+            level=(
+                logging.WARNING
+                if outcome.count(SyncAction.DISABLED) and not dry_run
+                else logging.INFO
+            ),
+            provider=outcome.provider,
+            source=outcome.source,
+            dry_run=dry_run,
+            run_id=outcome.run.pk if outcome.run else None,
+            status=outcome.status,
+            fetched=len(outcome.listing.records) if outcome.listing else 0,
+            complete=bool(outcome.listing and outcome.listing.complete),
+            **{action: outcome.count(action) for action in outcome.counts},
+            intel_written=outcome.intel_written,
+            intel_skipped=outcome.intel_skipped,
+        )
+
+        return Response(
+            {
+                "run": AdminProviderSyncRunSerializer(outcome.run).data
+                if outcome.run
+                else None,
+                "provider": outcome.provider,
+                "source": outcome.source,
+                "dry_run": dry_run,
+                "status": outcome.status,
+                # False means the provider's listing was not fully
+                # retrieved, and therefore that nothing was disabled. The
+                # SPA must say so rather than render a tally of zeroes
+                # that reads as "nothing vanished".
+                "complete": bool(outcome.listing and outcome.listing.complete),
+                "fetched": len(outcome.listing.records) if outcome.listing else 0,
+                "pages": outcome.listing.pages if outcome.listing else 0,
+                "counts": outcome.counts,
+                "intel_written": outcome.intel_written,
+                "intel_skipped": outcome.intel_skipped,
+                "errors": outcome.errors,
+                # Per-endpoint detail, naming the columns that changed and
+                # never their values -- the same rule the audit log
+                # follows, for the same reason: two of those columns are a
+                # paid credential.
+                "results": [
+                    {
+                        "action": item.action,
+                        "external_id": item.external_id,
+                        "endpoint": item.endpoint,
+                        "proxy": item.proxy_id,
+                        "fields": list(item.fields),
+                        "detail": item.detail or None,
+                    }
+                    for item in outcome.outcomes
+                ],
+            }
+        )
+
     @action(
         detail=False,
         methods=["post"],
@@ -1136,6 +1286,31 @@ class AdminUploadBatchViewSet(AdminReadOnlyViewSet):
     ordering_fields = ("created_at", "row_count", "fail_count", "id")
     ordering = ("-created_at",)
     queryset = UploadBatch.objects.select_related("uploaded_by")
+
+
+class AdminProviderSyncRunViewSet(AdminReadOnlyViewSet):
+    """Sync history. The `upload-batches` of provider syncs.
+
+    Read-only, and not merely by convention: a run row is a record of what
+    happened, and an editable one is not a record. It also carries the
+    only operator-visible answer to "has the 4am job been working", which
+    is a question nobody asks until the inventory has already decayed.
+    """
+
+    serializer_class = AdminProviderSyncRunSerializer
+    filterset_class = AdminProviderSyncRunFilter
+    search_fields = ("provider", "source", "errors")
+    ordering_fields = (
+        "started_at",
+        "finished_at",
+        "fetched_count",
+        "created_count",
+        "disabled_count",
+        "failed_count",
+        "id",
+    )
+    ordering = ("-started_at", "-id")
+    queryset = ProviderSyncRun.objects.select_related("triggered_by")
 
 
 # ---------------------------------------------------------------------------

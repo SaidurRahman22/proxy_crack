@@ -238,6 +238,15 @@ REST_FRAMEWORK = {
         # the feature out for everyone, so the budget is small and the
         # management command is the bulk path.
         "admin_intel": env("THROTTLE_ADMIN_INTEL", "20/hour"),
+        # Provider sync. The tightest scope here, for three reasons that
+        # stack: one call is a multi-page authenticated request against a
+        # vendor who rate limits us and can suspend the account, it holds
+        # a worker for the whole walk, and it is the one endpoint that can
+        # disable a large slice of the sellable inventory in a single
+        # press. The scheduled `sync_webshare` command is the normal path;
+        # this is the "the provider says they rotated our IPs, pull it
+        # now" button.
+        "admin_provider_sync": env("THROTTLE_ADMIN_PROVIDER_SYNC", "6/hour"),
     },
     "EXCEPTION_HANDLER": "api.exceptions.api_exception_handler",
 }
@@ -465,6 +474,81 @@ IP_INTEL_API_MAX_HOSTS = env_int("IP_INTEL_API_MAX_HOSTS", 25)
 # and that reasonable operators disagree about, so it is configuration
 # rather than an assertion in code.
 PROXY_JURISDICTION_BLOCS = None
+
+# How long a provider-asserted ASN is trusted, against IP_INTEL_TTL_DAYS
+# for a registry-verified one. Shorter on purpose: the shorter window is
+# what keeps a vendor's claim about its own network a stopgap rather than
+# a permanent answer, because once it expires `refresh_ip_intel` picks the
+# host up as stale and replaces it with a lookup nobody had an interest in.
+# See proxies.intel.store_provider_facts for the precedence rule.
+IP_INTEL_PROVIDER_TTL_DAYS = env_int("IP_INTEL_PROVIDER_TTL_DAYS", 7)
+
+
+# ---------------------------------------------------------------------------
+# Provider sync (R9).
+#
+# Nothing talked to the provider before this: proxies arrived by hand or by
+# CSV, so the inventory held a fraction of what was paid for and every
+# rotation decayed it further with no way back up.
+#
+# Same pluggable shape as PROXY_PROBER and IP_INTEL_BACKEND -- a dotted
+# path, a real adapter, and a deterministic fake that every test uses,
+# because CI can no more reach Webshare than it can reach a proxy.
+# ---------------------------------------------------------------------------
+
+PROVIDER_SYNC_BACKEND = env("PROVIDER_SYNC_BACKEND", "proxies.providers.WebshareSync")
+
+# ---- The API token --------------------------------------------------------
+# AS SENSITIVE AS THE PROXIES IT BUYS. One GET with this header returns
+# every credential on the account in plaintext, so it is handled exactly
+# like PROXY_CRED_KEY: environment only, never committed, never logged,
+# never in an error message, an audit payload or a stored error row. An
+# absent token fails loudly (proxies.providers.ProviderCredentialsMissing)
+# rather than producing an empty sync that looks like a quiet success.
+WEBSHARE_API_TOKEN = env("WEBSHARE_API_TOKEN", "")
+
+WEBSHARE_API_URL = env(
+    "WEBSHARE_API_URL", "https://proxy.webshare.io/api/v2/proxy/list/"
+)
+# `direct` is the per-endpoint listing. The alternative, `backbone`, is a
+# single rotating gateway and is a different product that this reconciler's
+# one-row-per-endpoint model does not describe.
+WEBSHARE_MODE = env("WEBSHARE_MODE", "direct")
+WEBSHARE_PAGE_SIZE = env_int("WEBSHARE_PAGE_SIZE", 100)
+
+# The listing carries NO protocol field. Webshare's direct proxies speak
+# HTTP on the returned port; SOCKS5, where a plan includes it, lives on a
+# different port and is not described by this endpoint. Stated once here
+# for the account rather than guessed per record -- the value decides how
+# the engine dials every hop it creates, and there is no evidence in the
+# response to guess from.
+WEBSHARE_PROTOCOL = env("WEBSHARE_PROTOCOL", "http")
+
+# What `Proxy.provider` is set to. This is the field R2's
+# operator-diversity check consumes, which is the other half of why this
+# feature is worth more than a bulk import: typed by hand, the diversity
+# score is only as good as the operator's spelling.
+WEBSHARE_PROVIDER_LABEL = env("WEBSHARE_PROVIDER_LABEL", "webshare")
+
+# Entitlement tier for proxies the sync CREATES. Premium by default for
+# the same reason the CSV importer defaults that way: a mis-tagged import
+# must never over-expose. The sync never re-tiers an existing row --
+# entitlement is an operator decision and no vendor listing expresses one.
+PROVIDER_SYNC_TIER = env("PROVIDER_SYNC_TIER", "premium")
+
+PROVIDER_SYNC_TIMEOUT_SECONDS = float(env("PROVIDER_SYNC_TIMEOUT_SECONDS", "20"))
+
+# Ceiling on records pulled in one run. Not a budget -- a brake. A listing
+# far larger than the account should hold means something is wrong
+# upstream, and discovering that by reconciling a hundred thousand rows is
+# worse than stopping. Reaching it marks the run PARTIAL, so nothing is
+# disabled on the strength of a truncated listing.
+PROVIDER_SYNC_MAX_RECORDS = env_int("PROVIDER_SYNC_MAX_RECORDS", 10000)
+
+# The admin endpoint reconciles synchronously in a request worker, exactly
+# like the probe and intel endpoints, so its cap is far lower than the
+# command's. The management command is the bulk path.
+PROVIDER_SYNC_API_MAX_RECORDS = env_int("PROVIDER_SYNC_API_MAX_RECORDS", 500)
 
 
 # ---------------------------------------------------------------------------

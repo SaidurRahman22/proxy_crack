@@ -1,5 +1,39 @@
 # Proxy Crack — Current Status
 
+> ## ⏸️ PAUSED 2026-10-17 — resume here
+>
+> **R9 (Webshare provider sync) is ~90% done and safely committed.** Work was paused
+> deliberately, not abandoned.
+>
+> **State is clean:** 911 tests pass, `manage.py check` clean, no migration drift,
+> migration `0006_provider_sync` applied.
+>
+> **Verified working:** the Webshare API connection. `GET /api/v2/proxy/list/` returns
+> **HTTP 200 and all 10 proxies**, all `valid: true`, with `asn_number` / `asn_name` /
+> `country_code` / `city_name` per record. Token is in `backend/.env`.
+>
+> **What is built but NOT yet verified against the live API:**
+> `proxies/providers.py`, `management/commands/sync_webshare.py`, migration `0006`,
+> admin sync endpoint, 119 new tests (all passing, all against the fake).
+>
+> ### To resume, in order
+> 1. `.\.venv\Scripts\python.exe manage.py sync_webshare --dry-run` — confirm it sees all 10
+> 2. Run it for real; confirm **proxy id 11 (`45.38.107.97`) is ADOPTED, not duplicated** —
+>    it was added by hand and has no `external_id`
+> 3. Confirm `IpIntelRecord` rows are populated from the provider's ASN data, marked
+>    **provider-asserted** rather than independently verified
+> 4. Confirm every synced proxy gets `provider = "webshare"`
+> 5. **Demonstrate R2 on the real pool**: a chain with `198.23.243.226` and `198.46.161.42`
+>    at entry and exit should raise a **critical** finding — both are **AS36352 (Hostpapa)**
+> 6. Any chain from this pool should also raise `entry_exit_shared_provider`, because all ten
+>    come from Webshare
+>
+> ### What the real inventory looks like (confirmed live)
+> **9 distinct ASNs, 5 countries, 1 provider.** Good network spread; zero operator diversity.
+> Webshare holds the payment record and knows all ten IPs are yours. This is exactly what R2
+> is built to say out loud.
+
+
 **Last updated:** 2026-10-16
 **Read this first.** Detail lives in [architecture.md](architecture.md),
 [memory.md](memory.md), [graph.md](graph.md), [roadmap.md](roadmap.md).

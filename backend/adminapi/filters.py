@@ -27,6 +27,8 @@ from core.models import Content, ContentKind
 from proxies.models import (
     IpIntelRecord,
     IpIntelStatus,
+    ProviderSyncRun,
+    ProviderSyncStatus,
     Proxy,
     ProxyChain,
     ProxyProtocol,
@@ -240,6 +242,25 @@ class AdminUploadBatchFilter(django_filters.FilterSet):
     class Meta:
         model = UploadBatch
         fields = ["uploaded_by", "created_at"]
+
+
+class AdminProviderSyncRunFilter(django_filters.FilterSet):
+    """Filters for the sync history.
+
+    `dry_run` is here because the two kinds of run must be separable: a
+    dashboard counting "endpoints disabled last week" that silently
+    includes rehearsals reports work that never happened.
+    """
+
+    provider = django_filters.CharFilter(field_name="provider", lookup_expr="iexact")
+    status = django_filters.ChoiceFilter(choices=ProviderSyncStatus.choices)
+    dry_run = django_filters.BooleanFilter(field_name="dry_run")
+    triggered_by = django_filters.ModelChoiceFilter(queryset=User.objects.all())
+    started_at = django_filters.DateTimeFromToRangeFilter(field_name="started_at")
+
+    class Meta:
+        model = ProviderSyncRun
+        fields = ["provider", "status", "dry_run", "triggered_by", "started_at"]
 
 
 class AdminContentFilter(django_filters.FilterSet):

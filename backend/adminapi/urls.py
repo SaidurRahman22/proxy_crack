@@ -26,6 +26,10 @@ router.register("plans", views.AdminPlanViewSet, basename="plan")
 router.register("subscriptions", views.AdminSubscriptionViewSet, basename="subscription")
 router.register("proxies", views.AdminProxyViewSet, basename="proxy")
 router.register("upload-batches", views.AdminUploadBatchViewSet, basename="uploadbatch")
+# Provider sync history (R9) -- what the scheduled `sync_webshare` run did.
+# The trigger itself lives at /api/admin/proxies/sync/, beside the
+# inventory it reconciles.
+router.register("sync-runs", views.AdminProviderSyncRunViewSet, basename="syncrun")
 router.register("content", views.AdminContentViewSet, basename="content")
 router.register("usage-logs", views.AdminUsageLogViewSet, basename="usagelog")
 router.register("chains", views.AdminChainViewSet, basename="chain")

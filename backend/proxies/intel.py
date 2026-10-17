@@ -81,6 +81,10 @@ from proxies.models import IpIntelRecord, IpIntelStatus
 logger = logging.getLogger("proxycrack.intel")
 
 __all__ = [
+    "INTEL_SKIPPED_FRESH_REGISTRY",
+    "INTEL_SKIPPED_UNKNOWN",
+    "INTEL_WRITTEN",
+    "PROVIDER_SOURCE_PREFIX",
     "CymruDnsIpIntel",
     "FakeIpIntel",
     "IntelBatch",
@@ -93,9 +97,12 @@ __all__ = [
     "cached_facts",
     "get_ip_intel",
     "intel_ttl",
+    "is_provider_source",
     "lookup_hosts",
     "normalise_host",
+    "provider_source",
     "store_facts",
+    "store_provider_facts",
 ]
 
 DEFAULT_TIMEOUT = 5.0
@@ -743,7 +750,37 @@ def get_ip_intel() -> IpIntel:
 # ---------------------------------------------------------------------------
 
 
-def intel_ttl(status=IpIntelStatus.OK):
+# ---------------------------------------------------------------------------
+# Provenance: who asserted this, and how much it is worth
+# ---------------------------------------------------------------------------
+#
+# `IpIntelRecord.source` already names the implementation that wrote a row.
+# Provider syncs add a second *kind* of source, and the difference is not a
+# detail: everything above queries a registry that has no stake in the
+# answer, while a provider describing its own inventory does. A vendor
+# reselling one upstream network under three AS names has a direct
+# commercial interest in those endpoints looking diverse, and the diversity
+# analysis exists precisely to catch that.
+#
+# So provider-supplied rows are prefixed rather than merged into the same
+# namespace. An operator reading the cache can see at a glance which rows
+# were verified independently, a query can separate them
+# (`source__startswith="provider:"`), and `store_provider_facts` below can
+# enforce that verified data is never silently replaced by asserted data.
+PROVIDER_SOURCE_PREFIX = "provider:"
+
+
+def provider_source(name):
+    """The `source` label for data a provider asserted about itself."""
+    return f"{PROVIDER_SOURCE_PREFIX}{name}"[:64]
+
+
+def is_provider_source(source):
+    """Whether this row came from a vendor rather than from a registry."""
+    return str(source or "").startswith(PROVIDER_SOURCE_PREFIX)
+
+
+def intel_ttl(status=IpIntelStatus.OK, source=""):
     """How long an answer of this kind is trusted.
 
     A success lasts a month: ASN assignments move on the order of years,
@@ -753,16 +790,34 @@ def intel_ttl(status=IpIntelStatus.OK):
     A failure lasts hours. A negative answer that lasted a month would mean
     one DNS outage pinned a host to "unknown" until next quarter, and
     "unknown" is the state this feature is trying to get *out* of.
+
+    A **provider-asserted** success lasts a week, shorter than a verified
+    one. Not because a vendor's ASN goes stale faster -- it does not -- but
+    because the shorter window is what makes the assertion a stopgap rather
+    than a permanent answer. Once it expires, `refresh_ip_intel` picks the
+    host up as stale and a registry lookup replaces it with something
+    nobody had an interest in. The next sync re-asserts it if the registry
+    still cannot be reached, so a host is never worse off than unknown.
     """
-    if status == IpIntelStatus.OK:
-        days = float(getattr(settings, "IP_INTEL_TTL_DAYS", 30))
+    if status != IpIntelStatus.OK:
+        hours = float(getattr(settings, "IP_INTEL_NEGATIVE_TTL_HOURS", 6))
+        return timedelta(hours=max(0.0, hours))
+    if is_provider_source(source):
+        days = float(getattr(settings, "IP_INTEL_PROVIDER_TTL_DAYS", 7))
         return timedelta(days=max(0.0, days))
-    hours = float(getattr(settings, "IP_INTEL_NEGATIVE_TTL_HOURS", 6))
-    return timedelta(hours=max(0.0, hours))
+    days = float(getattr(settings, "IP_INTEL_TTL_DAYS", 30))
+    return timedelta(days=max(0.0, days))
 
 
 def store_facts(facts: IpFacts, *, now=None) -> IpIntelRecord:
-    """Write one answer to the cache, replacing any previous one."""
+    """Write one answer to the cache, replacing any previous one.
+
+    Unconditional, and that is the correct direction of the precedence
+    rule: this is the path a registry lookup takes, and a registry answer
+    always supersedes a provider's claim about its own inventory. The
+    asymmetry lives in `store_provider_facts`, which is the only guarded
+    writer.
+    """
     now = now or timezone.now()
     record, _created = IpIntelRecord.objects.update_or_create(
         query=normalise_host(facts.query),
@@ -777,10 +832,60 @@ def store_facts(facts: IpFacts, *, now=None) -> IpIntelRecord:
             "source": (facts.source or "")[:64],
             "detail": (facts.detail or "")[:255],
             "looked_up_at": now,
-            "expires_at": now + intel_ttl(facts.status),
+            "expires_at": now + intel_ttl(facts.status, facts.source),
         },
     )
     return record
+
+
+#: Why `store_provider_facts` declined to write. Returned rather than
+#: logged so a sync run can report the tally honestly.
+INTEL_WRITTEN = "written"
+INTEL_SKIPPED_UNKNOWN = "no_origin"
+INTEL_SKIPPED_FRESH_REGISTRY = "fresh_registry_record"
+
+
+def store_provider_facts(facts: IpFacts, *, now=None):
+    """Write provider-asserted intel, unless verified data already stands.
+
+    Returns `(record_or_None, outcome)` where `outcome` is one of the
+    `INTEL_*` constants above.
+
+    **The precedence rule, stated once:**
+
+    1. Nothing cached        -> write. Something beats nothing.
+    2. Cached row is also    -> write. Refreshing our own copy of the
+       provider-asserted        vendor's claim costs nothing.
+    3. Cached row came from  -> **refuse**. This is the case the rule
+       a registry and is        exists for. A vendor must not be able to
+       still fresh              overwrite an independent measurement of
+                                its own network with a friendlier number.
+    4. Cached row came from  -> write. A stale row is already excluded
+       a registry and has       from every analysis (`cached_facts`
+       expired                   filters on `expires_at`), so the real
+                                choice here is between "unknown" and "the
+                                vendor says AS36352, and the row says the
+                                vendor said it". The second is strictly
+                                more information, and it is labelled.
+
+    A fact with no origin is never written at all. Recording "the provider
+    told us nothing" as a cache row would push out whatever is there and
+    teach the analysis nothing.
+    """
+    now = now or timezone.now()
+    if not facts.is_known:
+        return None, INTEL_SKIPPED_UNKNOWN
+
+    key = normalise_host(facts.query)
+    existing = IpIntelRecord.objects.filter(query=key).first()
+    if (
+        existing is not None
+        and not is_provider_source(existing.source)
+        and existing.is_fresh(now)
+    ):
+        return existing, INTEL_SKIPPED_FRESH_REGISTRY
+
+    return store_facts(facts, now=now), INTEL_WRITTEN
 
 
 def cached_facts(hosts: Iterable[str], *, now=None, include_stale=False):

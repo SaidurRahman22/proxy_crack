@@ -33,6 +33,7 @@ from core.models import Content
 from proxies.models import (
     ChainHop,
     IpIntelRecord,
+    ProviderSyncRun,
     Proxy,
     ProxyChain,
     ProxyProtocol,
@@ -498,6 +499,13 @@ class AdminProxyListSerializer(serializers.ModelSerializer):
             # ASN says which network an address sits on, never who was
             # paid for it. See proxies.diversity.
             "provider",
+            # The provider's own id, and whether a sync (rather than an
+            # operator) switched this row off. Both read-only: the first
+            # is the sync's identity key and a hand-typed value would make
+            # the next run create a duplicate, the second is a record of
+            # who decided, which an editable field would stop being.
+            "external_id",
+            "disabled_by_sync",
             "tier",
             "is_enabled",
             # --- health, all derived -------------------------------
@@ -518,6 +526,8 @@ class AdminProxyListSerializer(serializers.ModelSerializer):
         read_only_fields = (
             "id",
             "requires_credentials",
+            "external_id",
+            "disabled_by_sync",
             "created_at",
             "updated_at",
             "success_rate",
@@ -828,6 +838,99 @@ class AdminUploadBatchSerializer(serializers.ModelSerializer):
         """The raw column, kept alongside the parsed list so an operator can
         read an error the parser did not recognise."""
         return obj.errors or ""
+
+
+# ---------------------------------------------------------------------------
+# Provider sync (R9)
+# ---------------------------------------------------------------------------
+
+
+class AdminProviderSyncRunSerializer(serializers.ModelSerializer):
+    """One recorded sync run. Entirely read-only.
+
+    `errors` is included because an operator needs to see why four
+    endpoints failed. It is safe to render precisely because
+    `proxies.providers` never puts a credential, a token or a response
+    body into it -- the messages name ids, addresses and status codes.
+    That is a property of the writer, asserted by a test, not of this
+    serializer.
+    """
+
+    triggered_by = serializers.SerializerMethodField()
+    duration_seconds = serializers.FloatField(read_only=True)
+    changed_count = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = ProviderSyncRun
+        fields = (
+            "id",
+            "provider",
+            "source",
+            "status",
+            "dry_run",
+            "triggered_by",
+            "pages",
+            "fetched_count",
+            "created_count",
+            "updated_count",
+            "adopted_count",
+            "disabled_count",
+            "reenabled_count",
+            "unchanged_count",
+            "failed_count",
+            "invalid_count",
+            "intel_written",
+            "intel_skipped",
+            "changed_count",
+            "errors",
+            "started_at",
+            "finished_at",
+            "duration_seconds",
+        )
+        read_only_fields = fields
+
+    def get_triggered_by(self, obj):
+        return obj.triggered_by.email if obj.triggered_by_id else None
+
+
+class ProviderSyncRequestSerializer(serializers.Serializer):
+    """`POST /api/admin/proxies/sync/` -- pull the provider's listing now.
+
+    Defaults to a **dry run**, the opposite of the other admin actions and
+    the same default as the `sync_webshare` command. Reconciling is the
+    one admin operation that can disable a large part of the inventory on
+    the strength of somebody else's HTTP response, so the rehearsal is
+    what you get by omission and committing is what you have to ask for.
+    """
+
+    dry_run = serializers.BooleanField(
+        default=True,
+        help_text="Default true. Set false to actually write.",
+    )
+    limit = serializers.IntegerField(
+        required=False,
+        min_value=1,
+        help_text="Stop after this many records. A truncated listing "
+        "disables nothing -- an endpoint absent from a partial listing has "
+        "not been shown to have vanished.",
+    )
+    write_intel = serializers.BooleanField(
+        default=True,
+        help_text="Fill IpIntelRecord from the provider's ASN fields, "
+        "marked as provider-asserted. On by default: without it, on a host "
+        "with no DNS resolver configured, the diversity analysis reports "
+        "every hop as unknown.",
+    )
+
+    def validate_limit(self, value):
+        cap = int(getattr(settings, "PROVIDER_SYNC_API_MAX_RECORDS", 500))
+        if value > cap:
+            raise serializers.ValidationError(
+                f"At most {cap} records per request; this endpoint "
+                f"reconciles synchronously in a request worker. Use the "
+                f"`sync_webshare` management command for a full sync."
+            )
+        return value
 
 
 # ---------------------------------------------------------------------------

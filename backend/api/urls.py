@@ -17,6 +17,8 @@ urlpatterns = [
     path("auth/register/", views.RegisterView.as_view(), name="auth-register"),
     path("auth/login/", views.LoginView.as_view(), name="auth-login"),
     path("auth/refresh/", views.RefreshView.as_view(), name="auth-refresh"),
+    # Mirrors /api/admin/auth/logout/ so both clients share one shape (P17).
+    path("auth/logout/", views.LogoutView.as_view(), name="auth-logout"),
     path("subscription/", views.SubscriptionView.as_view(), name="subscription"),
     path("", include(router.urls)),
 ]

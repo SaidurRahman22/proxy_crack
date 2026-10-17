@@ -68,3 +68,6 @@ admin/.playwright-mcp/
 # Local credentials - NEVER commit
 ACCESS.md
 **/ACCESS.md
+
+# Engine binary - fetched, not committed (56 MB). See app/android/app/libs/README.md
+app/android/app/libs/*.aar

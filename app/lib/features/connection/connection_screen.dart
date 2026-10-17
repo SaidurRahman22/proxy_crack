@@ -13,6 +13,7 @@ import '../../shared/format.dart';
 import '../../shared/widgets/badges.dart';
 import '../../shared/widgets/latency_notice.dart';
 import '../../shared/widgets/surface.dart';
+import '../../shared/widgets/udp_notice.dart';
 import 'widgets/chain_summary_card.dart';
 import 'widgets/connect_button.dart';
 import 'widgets/stat_tile.dart';
@@ -537,6 +538,13 @@ class _DetailColumn extends StatelessWidget {
         if (!chain.isEmpty) ...<Widget>[
           const SizedBox(height: AppSpacing.md),
           LatencyNotice(chain: chain, compact: live),
+        ],
+        // P7. Renders nothing when every hop carries UDP, so it costs the
+        // common case nothing and is impossible to forget on the uncommon
+        // one.
+        if (!chain.supportsUdp) ...<Widget>[
+          const SizedBox(height: AppSpacing.md),
+          UdpNotice(chain: chain),
         ],
       ],
     );

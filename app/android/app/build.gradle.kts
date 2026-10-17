@@ -27,6 +27,20 @@ android {
         // flag during build.
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+
+        // libXray ships four ABIs. x86 is dropped - no current device needs
+        // it, and each one is roughly 37 MB of Go.
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+        }
+    }
+
+    packaging {
+        jniLibs {
+            // Uncompressed and page-aligned, so the loader maps libgojni.so
+            // instead of extracting 40 MB on first launch.
+            useLegacyPackaging = false
+        }
     }
 
     buildTypes {
@@ -42,6 +56,12 @@ kotlin {
     compilerOptions {
         jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
     }
+}
+
+dependencies {
+    // libXray.aar - the engine. 56 MB, gitignored, fetched with
+    // `python tools/fetch_engine.py`. See app/android/app/libs/README.md.
+    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar"))))
 }
 
 flutter {

@@ -106,6 +106,30 @@ class EmailTokenObtainPairSerializer(TokenObtainPairSerializer):
         return data
 
 
+class LogoutSerializer(serializers.Serializer):
+    """Body of `POST /api/auth/logout/` (P17).
+
+    Same field name as the admin API's logout so both clients post the
+    same shape, but every constraint is relaxed: `refresh` is optional,
+    may be blank and may be null.
+
+    That is not laziness about validation. A 400 from sign-out leaves the
+    refresh token alive for up to 30 days, which is the entire defect
+    this endpoint closes -- so the one outcome worth ruling out is the
+    one where the client gets an error and gives up. Validation rejects
+    nothing here; the view treats anything unusable as "already
+    unusable", which is operationally true.
+    """
+
+    refresh = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        allow_null=True,
+        help_text="The refresh token to blacklist. Anything unusable is "
+        "accepted and ignored -- the response is 204 either way.",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Proxies
 # ---------------------------------------------------------------------------
@@ -158,7 +182,10 @@ class ProxyDetailSerializer(ProxyListSerializer):
     """Single-proxy view including credentials.
 
     Served only by the retrieve action, which carries the
-    `proxy_credentials` throttle scope and writes an audit log line.
+    `proxy_credentials` budget and writes an audit log line. That budget
+    is counted in distinct proxies per window rather than in requests
+    (P16), so fetching the same hop again during a reconnect is free and
+    uncovering a new one is not.
     """
 
     class Meta(ProxyListSerializer.Meta):
@@ -574,9 +601,14 @@ class ResolvedHopSerializer(serializers.Serializer):
     of paid credentials in one unthrottled request, which is precisely the
     bulk disclosure `architecture.md` section 3 forbids. The client fetches
     each hop's credentials from `credentials_url` -- one proxy per request,
-    under the existing `proxy_credentials` throttle, each one audit-logged.
+    under the existing `proxy_credentials` budget, each one audit-logged.
     Three extra round trips per connect is a cheap price for keeping the
     anti-scrape control intact.
+
+    Those three round trips are what made a *request* budget the wrong
+    shape (P16): the budget now counts distinct proxies disclosed, so the
+    per-hop fetch pattern D18 requires costs a 3-hop chain three units for
+    the hour however many times it reconnects.
     """
 
     position = serializers.IntegerField(read_only=True)

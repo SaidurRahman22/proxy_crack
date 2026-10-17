@@ -182,7 +182,26 @@ REST_FRAMEWORK = {
         "register": env("THROTTLE_REGISTER", "10/hour"),
         "login": env("THROTTLE_LOGIN", "20/hour"),
         "proxy_list": env("THROTTLE_PROXY_LIST", "60/min"),
+        # Credential disclosure, counted in **distinct proxies**, not in
+        # requests (P16). D18 makes a client fetch credentials one hop at
+        # a time, so a request budget charged a 3-hop user three times per
+        # connect and three more per failover -- twenty minutes of flapping
+        # locked them out of connecting at all, and a paying user burned
+        # budget faster than a free one. Counting coverage instead fixes
+        # that without moving the wall: a reconnecting user re-fetches the
+        # same handful of proxies for free, while a scraper still pays one
+        # unit for every new proxy. Hence 60/hour is unchanged. See
+        # `api/throttling.py`.
         "proxy_credentials": env("THROTTLE_PROXY_CREDENTIALS", "60/hour"),
+        # And a ceiling on patience, like the admin side: 60/hour alone is
+        # 1440 proxies a day to anyone willing to wait. A real client
+        # touches tens of distinct proxies a day.
+        "proxy_credentials_day": env("THROTTLE_PROXY_CREDENTIALS_DAY", "400/day"),
+        # Sign-out (P17). Deliberately loose. The endpoint discloses
+        # nothing and costs one signature check; throttling it into
+        # failure leaves a live refresh token behind, which is the thing
+        # it exists to revoke.
+        "logout": env("THROTTLE_LOGOUT", "60/min"),
         "chain_write": env("THROTTLE_CHAIN_WRITE", "60/hour"),
         # Chain resolution. Looser than a write because a client resolves
         # on every connect and on every failover, but still bounded: a

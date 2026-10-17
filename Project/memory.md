@@ -336,8 +336,34 @@ New open items, ordered by severity:
 
 | # | Issue | Why it matters |
 |---|---|---|
-| **P16** | **The 60/hour `proxy_credentials` budget does not scale with chain length.** A 3-hop chain costs 3 per connect *and* 3 per failover. A flaky session exhausts it in ~20 minutes and locks the user out of connecting for an hour. | Product-breaking under exactly the conditions failover exists for. Fix: scale the budget by `max_chain_length`, or have `/resolve/` mint a short-lived grant. |
-| **P17** | **No mobile `logout` endpoint.** Sign-out is local only; the refresh token stays valid up to 30 days. | Fine for a tidy user, wrong for a stolen phone. |
+| ~~P16~~ | ✅ **RESOLVED 2026-10-17 — by changing the UNIT of the budget, not its size.** It still allows 60/hour, but counts **distinct proxies disclosed per user per window** rather than requests. A repeat fetch of an already-disclosed proxy is free; a proxy not yet disclosed costs one unit. Plus `proxy_credentials_day` at 400/day distinct, because an hourly limit alone is defeated by patience. **Verified live:** 15 fetches of the same 3 proxies on a budget of 3 → all 200; then 4 new proxies → all 429. | — |
+| ~~P17~~ | ✅ **RESOLVED 2026-10-17.** `POST /api/auth/logout/` blacklists the refresh token, audited through the P9 seam, throttled loosely (60/min). **Deliberately forgiving** — missing/blank/garbage token still returns 204, because a 400 from sign-out leaves the token alive for 30 days, which is the entire defect. | — |
+
+#### 🔴 My proposed P16 fix was wrong, and the agent correctly refused to build it
+
+I suggested `/resolve/` should mint a short-lived grant, arguing *"a scraper has no grant"*.
+**That is false.** `POST /api/chains/resolve/` — the ad-hoc resolver built the same day to close
+P18 — accepts an arbitrary list of entitled proxy ids at **120/hour** and saves nothing. Minting
+is therefore self-service: 120 grants/hour × 3 hops = **360 proxies/hour with no daily ceiling**,
+six times the budget it was supposed to tighten. The grant would have inherited the *resolver's*
+limit, not the credential one.
+
+The lesson generalises: **a request budget structurally cannot distinguish "the same three
+credentials forty times" from "forty credentials"** — and under D18 those are precisely the two
+cases that must be told apart. Counting coverage rather than requests separates them with no
+usability cost at all.
+
+**What was traded away, stated plainly:** disclosure is still not tied to a resolution the server
+authorised — a user can walk 60 arbitrary entitled proxies an hour, one at a time. That is the
+status quo unchanged, so nothing was lost, but nothing was gained there either. If that property
+is wanted it belongs on the list endpoint and the resolver too, not bolted onto the credential
+fetch.
+
+#### ⚠️ P24 (new): the ADMIN logout is not audit-logged
+
+It writes a log line only. P9 made audit *rows* the evidence, and admin sign-out currently leaves
+none — a P9 regression on the console surface that nobody had noticed. The mobile logout built
+today **is** audited, so the two endpoints now differ on that axis.
 | **P18** | **No way to resolve an *unsaved* chain.** `/resolve/` requires a saved chain, so "connect with these three" forces a `POST /api/chains/` first — spending `chain_write` budget and leaving a preset row the user never asked for. | `POST /api/chains/resolve/`, mirroring the ad-hoc diversity endpoint, removes a whole class of junk rows. |
 | **P19** | **`credentials_url` uses `request.build_absolute_uri`** — it echoes whatever `Host` header arrived, so behind a reverse proxy it points somewhere the device cannot reach. Only the path is authoritative. | Return a relative path, or just the proxy id. Client currently re-bases it defensively. |
 | **P20** | **`error.detail` has three shapes, two of them maps** (entitlement `{message,…}` vs DRF `{field:[msg]}`). Client discriminates by probing for a `message` key — breaks the first time a field is named `message`. | Add a discriminator. |

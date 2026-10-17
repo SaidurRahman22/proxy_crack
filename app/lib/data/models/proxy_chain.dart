@@ -67,6 +67,24 @@ class ProxyChain {
 
   bool get requiresPremium => hops.any((h) => h.proxy.isPremium);
 
+  /// Whether the chain can carry UDP at all.
+  ///
+  /// A chain is only as UDP-capable as its weakest hop, and an HTTP proxy
+  /// cannot carry UDP (memory.md P7; Xray docs: *"`http` can only proxy the
+  /// TCP protocol"*). When this is false the engine installs an explicit
+  /// black-hole rule for UDP so QUIC fails immediately and falls back to
+  /// TCP, rather than hanging — see `XrayConfigBuilder`. The UI must say so
+  /// before the user connects, because what breaks (video calls, games,
+  /// WebRTC) does not look like a proxy problem from inside the app.
+  ///
+  /// An empty chain answers false: it carries nothing at all.
+  bool get supportsUdp =>
+      hops.isNotEmpty && hops.every((h) => h.proxy.protocol.carriesUdp);
+
+  /// The hops responsible for [supportsUdp] being false, in order.
+  List<ChainHop> get tcpOnlyHops =>
+      hops.where((h) => !h.proxy.protocol.carriesUdp).toList(growable: false);
+
   /// Expected round-trip, in ms: every hop contributes a full RTT, plus a
   /// per-hop connection-setup cost for the CONNECT/handshake exchange.
   int get estimatedLatencyMs {

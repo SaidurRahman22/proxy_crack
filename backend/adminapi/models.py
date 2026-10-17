@@ -109,6 +109,11 @@ class AuditAction(models.TextChoices):
     # Authentication.
     LOGIN = "admin_login", "Login succeeded"
     LOGIN_FAILED = "admin_login_failed", "Login failed"
+    # Mobile sign-out (P17). Unprefixed like `credential_access`, because
+    # the `admin_` prefix marks the console surface and this is the
+    # mobile one. The row is what answers "when did this account last end
+    # a session, and from where" after a phone goes missing.
+    LOGOUT = "logout", "Logout"
     # Meta: recorded by `prune_audit_log` after it deletes, so the record
     # of the deletion is itself outside what was deleted.
     AUDIT_LOG_PRUNED = "audit_log_pruned", "Audit log pruned"

@@ -1,6 +1,6 @@
 import 'package:flutter/foundation.dart';
 
-import '../core/routing/mock_proxy_engine.dart';
+import '../core/routing/engine_factory.dart';
 import '../core/routing/proxy_engine.dart';
 import '../data/api/api_client.dart';
 import '../data/api/api_config.dart';
@@ -111,7 +111,15 @@ class AppServices {
           ? MockCatalogRepository()
           : ApiCatalogRepository(client),
       session: session,
-      engine: engine ?? MockProxyEngine(),
+      // Phase 3: the real engine. `createDefaultEngine()` answers
+      // `AndroidVpnEngine` on a device and `MockProxyEngine` everywhere
+      // else, so tests and desktop builds are untouched.
+      //
+      // This is the swap engine-decision.md §2 promised would be one line.
+      // It lives here rather than in `proxy_crack_app.dart` because
+      // `main()` builds `AppServices` itself and passes it in, so the
+      // default inside this factory is what a real run actually gets.
+      engine: engine ?? createDefaultEngine(),
       usesMockApi: mock,
     );
   }

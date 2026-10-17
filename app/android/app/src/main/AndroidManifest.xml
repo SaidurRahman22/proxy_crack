@@ -9,6 +9,23 @@
     <!-- Lets the client distinguish "no network" from "server unreachable". -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
 
+    <!--
+      The tunnel runs in a foreground service. The base permission plus the
+      Android 14+ type-specific one: FOREGROUND_SERVICE_SPECIAL_USE is a
+      normal permission, granted at install, not revocable by the user.
+      Declaring the type in <service> without this permission throws a
+      SecurityException at startForeground().
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
+
+    <!--
+      Runtime permission since Android 13. The service still runs if it is
+      denied, but the persistent notification is hidden, which is both a bad
+      experience and an invitation for OEM battery managers to kill us.
+    -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+
     <application
         android:label="proxy_crack"
         android:name="${applicationName}"
@@ -36,6 +53,55 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!--
+          The tunnel.
+
+          android:exported="true" with android:permission="BIND_VPN_SERVICE"
+          is the correct and required combination: the system must be able to
+          reach the service, and the permission attribute makes sure only the
+          system can. BIND_VPN_SERVICE is NOT a <uses-permission> - declaring
+          it as one grants this app nothing and is a common, confusing bug.
+        -->
+        <service
+            android:name=".VpnConnectionService"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:foregroundServiceType="specialUse"
+            android:exported="true">
+
+            <intent-filter>
+                <action android:name="android.net.VpnService"/>
+            </intent-filter>
+
+            <!--
+              Required whenever foregroundServiceType="specialUse", and read
+              by a human reviewer at Play submission.
+
+              "systemExempted" is documented for "VPN apps configured using
+              Settings > Network & Internet > VPN" - the always-on case, not
+              an app starting its own tunnel from its own UI. Declaring it
+              without qualifying throws ForegroundServiceTypeNotAllowedException.
+            -->
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Maintains the user-initiated VPN tunnel and the multi-hop proxy chain carrying all device traffic. The service must stay alive for the entire duration of the connection; terminating it silently drops all network traffic for every app on the device."/>
+
+            <!--
+              Opted OUT of always-on, deliberately and temporarily.
+
+              A system-started service receives no Intent of ours and no UI.
+              It would have to rebuild the last chain from storage - but
+              credentials are fetched per hop at connect time and are never
+              persisted (engine-decision.md §7.1 note 8), so a headless start
+              would need a valid cached auth token and a credential re-fetch.
+              That is phase 4 work. Claiming always-on before it exists would
+              give the user a VPN that silently fails to come up after a
+              reboot. Remove this element to support it.
+            -->
+            <meta-data
+                android:name="android.net.VpnService.SUPPORTS_ALWAYS_ON"
+                android:value="false"/>
+        </service>
+
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

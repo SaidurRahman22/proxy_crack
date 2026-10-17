@@ -11,6 +11,7 @@ import '../../shared/format.dart';
 import '../../shared/widgets/latency_notice.dart';
 import '../../shared/widgets/state_views.dart';
 import '../../shared/widgets/surface.dart';
+import '../../shared/widgets/udp_notice.dart';
 import 'widgets/diversity_panel.dart';
 import 'widgets/hop_card.dart';
 
@@ -335,6 +336,13 @@ class _ChainFooter extends StatelessWidget {
                 chain: chain,
               ),
             ),
+            // P7. Renders nothing when every hop carries UDP, so it
+            // costs the common case nothing and cannot be forgotten on the
+            // uncommon one.
+            if (!chain.supportsUdp) ...<Widget>[
+              const SizedBox(height: AppSpacing.md),
+              UdpNotice(chain: chain),
+            ],
             const SizedBox(height: AppSpacing.md),
             // R2. Fetched on an actual edit to the chain (debounced), never
             // on a rebuild of this screen — the analysis is cheap but it is

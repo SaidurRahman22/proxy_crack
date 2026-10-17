@@ -1,6 +1,7 @@
 """DRF views for the Phase 1 API surface (architecture.md section 3).
 
     POST /api/auth/register/   /api/auth/login/   /api/auth/refresh/
+    POST /api/auth/logout/     (blacklists the submitted refresh token)
     GET  /api/proxies/         GET /api/proxies/{id}/   (credentials, throttled)
     GET  /api/chains/          POST /api/chains/        (+ detail CRUD)
     GET  /api/subscription/
@@ -17,10 +18,12 @@ from django.db.models import Prefetch
 from django.utils import timezone
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
-from rest_framework.generics import CreateAPIView
+from rest_framework.generics import CreateAPIView, GenericAPIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework_simplejwt.exceptions import TokenError
+from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
 # The audit seam lives in `adminapi` because that is where it was first
@@ -39,6 +42,7 @@ from api.serializers import (
     ChainDiversityRequestSerializer,
     ContentSerializer,
     EmailTokenObtainPairSerializer,
+    LogoutSerializer,
     PlanSerializer,
     ProxyChainSerializer,
     ProxyDetailSerializer,
@@ -47,6 +51,10 @@ from api.serializers import (
     ResolvedHopSerializer,
     SubscriptionSerializer,
     UsageLogSerializer,
+)
+from api.throttling import (
+    CredentialDailyDisclosureThrottle,
+    CredentialDisclosureThrottle,
 )
 from billing.entitlements import (
     entitlement_payload,
@@ -89,6 +97,88 @@ class RefreshView(TokenRefreshView):
     throttle_scope = "login"
 
 
+class LogoutView(GenericAPIView):
+    """`POST /api/auth/logout/` {refresh} -> 204 (P17).
+
+    Sign-out was local only. The refresh token stayed valid for up to 30
+    days, so a phone that was sold, stolen or handed to somebody kept a
+    self-renewing session long after its owner thought they had signed
+    out. This blacklists the submitted refresh token, which is the only
+    thing that actually ends the session server-side.
+
+    **Shape mirrors `/api/admin/auth/logout/`** -- same path suffix, same
+    `{"refresh": ...}` body, same 204 -- so both clients share one
+    convention.
+
+    **Forgiving on purpose, and more so than the admin one.** Every
+    outcome is 204: a token that is already blacklisted, expired,
+    malformed, an access token sent by mistake, a blank string, or no
+    `refresh` key at all. The reasoning is asymmetric. A client that gets
+    an error from sign-out will log it and move on -- the user is already
+    looking at a signed-out screen -- and the live refresh token is the
+    thing we were trying to kill. Returning 400 for a malformed body buys
+    a client-side diagnostic and pays for it with exactly the failure
+    this endpoint exists to prevent. The admin version returns 400 when
+    `refresh` is missing; that divergence is deliberate, not an
+    oversight.
+
+    **Throttled loosely** (`logout`). Rate-limiting sign-out into failure
+    is a security own-goal: the endpoint discloses nothing, costs one
+    signature check and one insert, and the thing on the other side of
+    the limit is an un-revoked credential.
+
+    **Audited.** `logout` goes through the same seam as every other
+    audited action (P9), so "when did this account last end a session,
+    and from where" is a query rather than a grep. The token itself is
+    never recorded -- only the outcome.
+
+    What this does *not* do: revoke the access token. JWTs are stateless
+    and a blacklist check on every request would undo the reason for
+    using them. The access token dies on its own within
+    `JWT_ACCESS_MINUTES` (30), and after that the session cannot be
+    renewed. Shortening that window is the lever if 30 minutes is too
+    long; it is a settings change, not a code one.
+    """
+
+    serializer_class = LogoutSerializer
+    permission_classes = (IsAuthenticated,)
+    throttle_scope = "logout"
+
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data)
+        # Cannot raise: every field on LogoutSerializer is optional and
+        # blank-tolerant. Kept so the validation seam exists if the body
+        # ever grows a field that is not.
+        serializer.is_valid(raise_exception=True)
+        token = (serializer.validated_data.get("refresh") or "").strip()
+
+        if not token:
+            outcome = "no_token"
+            logger.info("logout_without_token user=%s", request.user.pk)
+        else:
+            try:
+                RefreshToken(token).blacklist()
+            except TokenError as exc:
+                # Already blacklisted, expired, the wrong token type, or
+                # not a token at all. Indistinguishable from here and all
+                # four mean the same thing operationally: this token
+                # cannot be used to renew a session.
+                outcome = "token_unusable"
+                logger.info("logout_token_unusable user=%s (%s)", request.user.pk, exc)
+            else:
+                outcome = "blacklisted"
+                logger.info("logout user=%s", request.user.pk)
+
+        audit(
+            "logout",
+            request=request,
+            target_user_id=request.user.pk,
+            outcome=outcome,
+            via="mobile",
+        )
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
 # ---------------------------------------------------------------------------
 # Proxies
 # ---------------------------------------------------------------------------
@@ -99,7 +189,9 @@ class ProxyViewSet(viewsets.ReadOnlyModelViewSet):
 
     The list serializer omits credentials entirely. Credentials are available
     only one proxy at a time from the retrieve action, which runs under the
-    much tighter `proxy_credentials` throttle and is audit-logged.
+    much tighter `proxy_credentials` budget and is audit-logged. That budget
+    is denominated in distinct proxies rather than requests -- see
+    `get_throttles` and `api/throttling.py` (P16).
     """
 
     permission_classes = (IsAuthenticated,)
@@ -123,9 +215,27 @@ class ProxyViewSet(viewsets.ReadOnlyModelViewSet):
     ordering = ("-quality_score",)
 
     def get_throttles(self):
-        self.throttle_scope = (
-            "proxy_credentials" if self.action == "retrieve" else "proxy_list"
-        )
+        """The credential budget is counted in proxies, not in requests.
+
+        P16: a flat request budget cannot tell "the same three credentials
+        forty times" from "forty credentials", and under D18 those are
+        exactly the two cases that have to be told apart -- a 3-hop
+        connect costs three fetches and every failover costs up to three
+        more. Counting distinct proxies disclosed in the window makes a
+        reconnecting user's consumption a function of their chain rather
+        than of how often they reconnect, while charging a scraper one
+        unit for every new proxy exactly as before. See `api/throttling.py`.
+        """
+        if getattr(self, "action", None) == "retrieve":
+            # ScopedRateThrottle is still in the default list; leaving the
+            # scope unset makes it a no-op so the two disclosure throttles
+            # below are the only budget on this action.
+            self.throttle_scope = None
+            return super().get_throttles() + [
+                CredentialDisclosureThrottle(),
+                CredentialDailyDisclosureThrottle(),
+            ]
+        self.throttle_scope = "proxy_list"
         return super().get_throttles()
 
     def get_serializer_class(self):

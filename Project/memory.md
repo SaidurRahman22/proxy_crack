@@ -385,6 +385,39 @@ today **is** audited, so the two endpoints now differ on that axis.
 `ACCESS.md` at the repo root. **Gitignored** (`.gitignore` matches `ACCESS.md` and `**/ACCESS.md`;
 verified with `git check-ignore`). Never commit it, never paste it into chat.
 
+### 🔴🔴 P25 — WEBSHARE BLOCKS PROXY-TO-PROXY CONNECT. Multi-hop cannot work on this inventory.
+
+**Confirmed independently, twice — from the device and from the host.** Through one Webshare
+hop:
+
+```
+neutral host :443            -> HTTP/1.0 200 OK      (control)
+neutral host :853 (non-443)  -> HTTP/1.0 200 OK      (so it is not a port rule)
+another proxy in inventory   -> HTTP/1.1 403 Forbidden
+another proxy in inventory   -> HTTP/1.1 403 Forbidden
+another proxy in inventory   -> HTTP/1.1 403 Forbidden
+```
+
+Webshare blocks CONNECT to another proxy — standard anti-abuse. `dialerProxy` chaining does
+exactly that CONNECT, so **a 2-hop chain establishes, routes correctly, and carries no traffic.**
+
+**This is not an engineering defect. The config is right, the engine is right, single-hop egress
+is proven.** All ten dev proxies are Webshare, so the product's core promise — chaining — cannot
+be delivered on this inventory at any price.
+
+It is strictly bigger than **P4**, which only asked whether the ToS permits *redistributing*
+credentials. This says the feature does not function.
+
+**What has to happen before Phase 4 means anything:**
+- source hops from a provider that permits proxy-to-proxy, **or**
+- use Shadowsocks / SOCKS5 hops (the block was observed on HTTP CONNECT; SS and SOCKS5 are
+  different protocols and may not be filtered the same way — **untested, and worth testing before
+  buying**), **or**
+- accept single-hop only, which makes this a VPN rather than a proxychain
+
+**Test this before paying any provider**: buy one endpoint from each candidate and attempt
+CONNECT from one to another. It is a ten-minute check that decides whether the product works.
+
 ### Positions taken
 
 - **Ship the lightweight per-process mode on Linux too.** For Linux power users that is

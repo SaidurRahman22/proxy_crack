@@ -45,7 +45,8 @@
 | | |
 |---|---|
 | **What works today** | Backend API + admin console, both running and verified. Mobile app UI with a mock engine. |
-| **What does not exist yet** | **The VPN engine.** No traffic is routed anywhere. This is Phase 3 and it is the biggest remaining build. |
+| **The VPN engine** | ✅ **BUILT AND PROVEN.** Real traffic egresses through a real proxy: VPN off -> ISP IP; VPN on -> the hop's IP. |
+| ⚠️ **But multi-hop does not work** | **Webshare blocks proxy-to-proxy CONNECT (403).** The engine is correct; the inventory cannot chain. See **P25**. |
 | **Repo** | `D:\project\Proxy`, branch `main`, **3 commits**, working tree clean |
 | **Remote** | `git@github.com:SaidurRahman22/proxy_crack.git` — ⚠️ **not pushed yet** (SSH key not registered on GitHub) |
 | **Backend tests** | **792 passing** |
@@ -59,7 +60,7 @@
 | **Backend API** (`backend/`) | ✅ working | Django 5.2 + DRF, 14 models, 39 migrations, 792 tests |
 | **Admin console** (`admin/`) | ✅ working | React + TS + Vite, runs against mock *or* live API |
 | **Mobile app** (`app/`) | ✅ wired to live API | Flutter 3.47, real auth + real data, 46 tests. Engine still mocked (Phase 3) |
-| **VPN engine** | ❌ not started | Phase 3. Xray-core via libXray decided (D9), nothing built |
+| **VPN engine** | ✅ working (1 hop) | Xray-core via libXray. TUN, consent, foreground service, DNS through tunnel, UDP black-hole, fail-closed. **Multi-hop blocked by the provider, not the code (P25).** |
 | **Desktop clients** | ❌ not started | Windows / Linux / macOS planned (D8), Android first |
 | **iOS** | ❌ blocked | Needs a Mac. Not buildable on this machine |
 

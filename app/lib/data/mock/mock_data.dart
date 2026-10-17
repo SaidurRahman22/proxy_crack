@@ -265,6 +265,33 @@ abstract final class MockData {
         ],
       );
 
+  /// Resolve an ad-hoc list of proxy ids, saving nothing — the mock twin of
+  /// `POST /api/chains/resolve/`. `chainId` is null because no chain exists.
+  static ResolvedChain resolveProxyIds(List<int> proxyIds) {
+    final byId = <int, Proxy>{for (final p in proxies()) p.id: p};
+    return ResolvedChain(
+      // 0 / '' is what `ResolvedChain.fromJson` produces for the live
+      // endpoint's `"chain": null`, so the mock must say the same thing —
+      // `isSaved` is how either path is read.
+      chainId: 0,
+      chainName: '',
+      resolvedAt: DateTime.now(),
+      hops: <ResolvedHop>[
+        for (var i = 0; i < proxyIds.length; i++)
+          if (byId[proxyIds[i]] != null)
+            ResolvedHop(
+              position: i,
+              hopId: 0,
+              fixed: true,
+              proxy: byId[proxyIds[i]]!,
+              credentialsUrl: '/api/proxies/${proxyIds[i]}/',
+              candidateCount: 1,
+              failoverCapable: false,
+            ),
+      ],
+    );
+  }
+
   /// A plausible R2 report, including the `unknown` band — the mock must
   /// exercise D20's "unknown ranks above high" ordering, not just the happy
   /// path, or the chain builder's hardest case is never seen in a test.

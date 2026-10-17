@@ -116,6 +116,20 @@ class RecordingRepository implements CatalogRepository {
     );
   }
 
+  /// The connect path. Recorded separately from `resolve` so a test can
+  /// assert that connecting does NOT save a chain — the regression that
+  /// made a second connect fail with "you already have a chain with this
+  /// name".
+  @override
+  Future<ResolvedChain> resolveProxies(List<int> proxyIds) async {
+    calls.add('resolve_adhoc');
+    final failure = resolveFailure;
+    if (failure != null) throw failure;
+    return MockData.resolve(
+      MockData.savedChain(id: 0, name: '', proxyIds: proxyIds, pool: pool),
+    );
+  }
+
   List<int> _lastSavedIds = const <int>[];
   set lastSavedIds(List<int> value) => _lastSavedIds = value;
 
@@ -198,18 +212,19 @@ void main() {
     expect(repository.count('credentials'), 0);
   });
 
-  test('connect saves, resolves, fetches credentials once per hop, then '
-      'starts the engine', () async {
+  test('connect resolves WITHOUT saving, fetches credentials once per hop, '
+      'then starts the engine', () async {
     build();
     await controller.load();
     final healthy = repository.pool.where((p) => p.isAlive).toList();
     controller.addHop(healthy.first);
-    repository.lastSavedIds = <int>[healthy.first.id];
 
     await controller.connect();
 
-    expect(repository.count('saveChain'), 1);
-    expect(repository.count('resolve'), 1);
+    // Connecting must not persist a preset: it spends the write budget and
+    // leaves a saved chain the user never asked for.
+    expect(repository.count('saveChain'), 0);
+    expect(repository.count('resolve_adhoc'), 1);
     expect(repository.credentialFetches, 1);
     expect(repository.perHopCredentialCalls, 1);
     expect(controller.connectStage, ConnectStage.idle);
@@ -254,7 +269,7 @@ void main() {
 
     await controller.connect();
 
-    expect(repository.count('resolve'), 1);
+    expect(repository.count('resolve_adhoc'), 1);
     expect(repository.count('credentials'), 0);
     final failure = controller.connectFailure;
     expect(failure, isA<ApiException>());
@@ -265,11 +280,14 @@ void main() {
     expect(controller.connectStage, ConnectStage.idle);
   });
 
-  test('an entitlement refusal on save stops the sequence immediately',
+  test('an entitlement refusal on resolve stops the sequence immediately',
       () async {
+    // Entitlement is now enforced on the resolve path, because that is the
+    // only call connect makes. The server re-checks it there regardless of
+    // what the client believes.
     build(
       repo: RecordingRepository(
-        saveFailure: ApiException(
+        resolveFailure: ApiException(
           status: 403,
           code: ApiErrorCode.chainLengthExceeded,
           detail: <String, dynamic>{
@@ -285,8 +303,8 @@ void main() {
 
     await controller.connect();
 
-    expect(repository.count('saveChain'), 1);
-    expect(repository.count('resolve'), 0);
+    expect(repository.count('saveChain'), 0);
+    expect(repository.count('resolve_adhoc'), 1);
     expect(repository.count('credentials'), 0);
     expect(
       (controller.connectFailure! as ApiException).detailValue(
@@ -296,25 +314,32 @@ void main() {
     );
   });
 
-  test('editing the chain invalidates the saved id so a stale chain is '
-      'never resolved', () async {
+  test('connecting twice in a row works — connect never saves a chain',
+      () async {
+    // Regression. Connect used to `POST /api/chains/` with a hardcoded
+    // name, so the SECOND connect hit the per-user unique-name constraint
+    // and failed with "You already have a chain with this name" — the app
+    // could not connect a second time at all. It also left a saved preset
+    // the user never asked for, and resolving the server's copy meant
+    // connecting through hops that might no longer match the screen.
     build();
     await controller.load();
     final healthy = repository.pool.where((p) => p.isAlive).take(2).toList();
+
     controller.addHop(healthy[0]);
-    repository.lastSavedIds = <int>[healthy[0].id];
     await controller.connect();
-    expect(controller.savedChainId, isNotNull);
+    expect(controller.connectFailure, isNull, reason: 'first connect');
 
     await controller.disconnect();
-    // The controller mirrors the engine through a stream, so the idle
-    // status lands one event loop turn after `disconnect` returns.
+    // The controller mirrors the engine through a stream, so idle lands one
+    // event-loop turn after `disconnect` returns.
     await Future<void>.delayed(const Duration(milliseconds: 10));
-    expect(controller.addHop(healthy[1]), isNull, reason: 'hop was refused');
-    // Without this, the next connect would resolve the server's copy of the
-    // chain — which no longer matches what is on screen, so the user would
-    // connect through hops they just changed.
-    expect(controller.savedChainId, isNull);
+
+    await controller.connect();
+    expect(controller.connectFailure, isNull, reason: 'second connect');
+
+    expect(repository.count('saveChain'), 0, reason: 'nothing was persisted');
+    expect(repository.count('resolve_adhoc'), 2);
   });
 
   test('sign-out drops every trace of the previous account', () async {

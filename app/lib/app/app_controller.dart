@@ -506,16 +506,15 @@ class AppController extends ChangeNotifier {
 
     ChainCredentials? credentials;
     try {
-      _setStage(ConnectStage.savingChain);
-      final saved = await repository.saveChain(
-        id: _savedChainId,
-        name: _chain.name,
-        proxyIds: _chain.hops.map((h) => h.proxy.id).toList(growable: false),
-      );
-      _savedChainId = saved.id;
-
+      // Connecting saves nothing. Previously this created a chain first,
+      // which spent the write budget, left a preset the user never asked
+      // for, and — because the name is reused — failed outright on the
+      // SECOND connect with "You already have a chain with this name",
+      // making the app impossible to connect with twice.
       _setStage(ConnectStage.resolving);
-      final resolved = await repository.resolveChain(saved.id);
+      final resolved = await repository.resolveProxies(
+        _chain.hops.map((h) => h.proxy.id).toList(growable: false),
+      );
 
       _setStage(ConnectStage.fetchingCredentials);
       credentials = await _fetchCredentials(resolved);

@@ -62,7 +62,7 @@ from proxies.diversity import (
     pseudonymise_providers,
 )
 from proxies.models import ChainHop, Proxy, ProxyChain
-from proxies.resolution import ChainResolutionError, resolve_chain
+from proxies.resolution import ChainResolutionError, resolve_chain, resolve_hops
 
 logger = logging.getLogger("proxycrack.api")
 
@@ -202,7 +202,7 @@ class ProxyChainViewSet(viewsets.ModelViewSet):
         return super().get_throttles()
 
     def get_serializer_class(self):
-        if getattr(self, "action", None) == "diversity_preview":
+        if getattr(self, "action", None) in ("diversity_preview", "resolve_preview"):
             return ChainDiversityRequestSerializer
         return super().get_serializer_class()
 
@@ -327,6 +327,68 @@ class ProxyChainViewSet(viewsets.ModelViewSet):
             "error": resolution_error,
         }
         return Response(payload)
+
+    @action(
+        detail=False,
+        methods=["post"],
+        url_path="resolve",
+        url_name="resolve-preview",
+    )
+    def resolve_preview(self, request):
+        """`POST /api/chains/resolve/` -- resolve a chain without saving it.
+
+        Connecting should not require persisting anything. Without this,
+        "just connect with these proxies" forces a `POST /api/chains/`
+        first: it spends the chain-write budget, and it leaves a saved
+        preset the user never asked for. Worse, a client that reuses one
+        name hits the per-user unique-name constraint on the *second*
+        connect and cannot connect again at all -- which is exactly the
+        failure that prompted this endpoint.
+
+        Mirrors `diversity_preview`: the chain is in the body, nothing is
+        written, and `resolve_hops` is the same resolver the saved path
+        uses, so a preview can never drift from the real thing.
+        """
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        proxy_ids = serializer.validated_data["proxy_ids"]
+
+        entitlement = resolve_entitlement(request.user)
+        # Same entitlement gate as the write path, so an id the user may
+        # not see fails here with the identical error code.
+        proxies = ProxyChainSerializer._check_proxies(proxy_ids, entitlement)
+
+        # Unsaved hops. `resolve_hops` takes hops rather than a chain
+        # precisely so this path exists; nothing here touches the DB.
+        hops = [
+            ChainHop(position=index, proxy=proxies[pk])
+            for index, pk in enumerate(proxy_ids)
+        ]
+
+        try:
+            resolution = resolve_hops(
+                hops, user=request.user, entitlement=entitlement
+            )
+        except ChainResolutionError as exc:
+            logger.info(
+                "chain_resolution_failed user=%s chain=adhoc code=%s position=%s",
+                request.user.pk,
+                exc.code,
+                exc.position,
+            )
+            raise _as_api_exception(exc)
+
+        return Response(
+            {
+                "chain": None,  # nothing was saved
+                "resolved_at": timezone.now(),
+                "hops": ResolvedHopSerializer(
+                    resolution.hops,
+                    many=True,
+                    context=self.get_serializer_context(),
+                ).data,
+            }
+        )
 
     @action(
         detail=False,

@@ -265,6 +265,27 @@ class ApiClient {
     return ResolvedChain.fromJson(body);
   }
 
+  /// `POST /api/chains/resolve/` — resolve without saving anything.
+  ///
+  /// Connecting should not persist a preset. Saving first spent the
+  /// chain-write budget, left a saved chain the user never asked for, and —
+  /// because the client reused one name — hit the per-user unique-name
+  /// constraint on the *second* connect, which made connecting impossible
+  /// until the chain was renamed. This path writes nothing.
+  ///
+  /// Goes through the same resolver as the saved path, so a preview can
+  /// never disagree with the real thing.
+  Future<ResolvedChain> resolveProxies(List<int> proxyIds) async {
+    final body = await _json(
+      RequestSpec(
+        method: HttpMethod.post,
+        path: '/api/chains/resolve/',
+        body: <String, Object?>{'proxy_ids': proxyIds},
+      ),
+    );
+    return ResolvedChain.fromJson(body);
+  }
+
   /// `GET /api/chains/{id}/diversity/` — the R2 report for a saved chain.
   ///
   /// Reads cached intel and never performs a lookup, which is why it is a

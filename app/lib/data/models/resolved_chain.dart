@@ -84,6 +84,13 @@ class ResolvedChain {
 
   int get length => hops.length;
 
+  /// Whether this resolution came from a saved chain.
+  ///
+  /// `POST /api/chains/resolve/` resolves an ad-hoc list and returns
+  /// `"chain": null`, which `fromJson` degrades to `0` / `''`. Read that
+  /// through here rather than comparing to zero at the call site.
+  bool get isSaved => chainId != 0;
+
   /// Hops with exactly one candidate — if one of these dies, the session
   /// drops rather than failing over.
   List<ResolvedHop> get singleCandidateHops =>

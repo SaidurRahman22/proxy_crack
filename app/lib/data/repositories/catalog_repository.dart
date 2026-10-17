@@ -54,6 +54,10 @@ abstract class CatalogRepository {
   /// `POST /api/chains/{id}/resolve/`. Point-in-time; never cache the result.
   Future<ResolvedChain> resolveChain(int chainId);
 
+  /// `POST /api/chains/resolve/` — resolve an ad-hoc chain, saving nothing.
+  /// This is the connect path: connecting must not create a saved preset.
+  Future<ResolvedChain> resolveProxies(List<int> proxyIds);
+
   /// `POST /api/chains/diversity/` — score an unsaved chain.
   Future<ChainDiversityReport> previewDiversity(List<int> proxyIds);
 
@@ -124,6 +128,10 @@ class ApiCatalogRepository implements CatalogRepository {
   @override
   Future<ResolvedChain> resolveChain(int chainId) =>
       client.resolveChain(chainId);
+
+  @override
+  Future<ResolvedChain> resolveProxies(List<int> proxyIds) =>
+      client.resolveProxies(proxyIds);
 
   @override
   Future<ChainDiversityReport> previewDiversity(List<int> proxyIds) =>
@@ -241,6 +249,21 @@ class MockCatalogRepository implements CatalogRepository {
       ),
     );
     return MockData.resolve(chain);
+  }
+
+  @override
+  Future<ResolvedChain> resolveProxies(List<int> proxyIds) async {
+    await Future<void>.delayed(latency * 0.5);
+    if (proxyIds.isEmpty) {
+      throw ApiException(
+        status: 409,
+        code: ApiErrorCode.chainUnresolvable,
+        detail: 'A chain needs at least one hop.',
+      );
+    }
+    // Resolves an ad-hoc list without touching `_chains`, mirroring the
+    // live path: connecting saves nothing.
+    return MockData.resolveProxyIds(proxyIds);
   }
 
   @override
